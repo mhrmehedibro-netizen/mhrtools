@@ -1,148 +1,163 @@
 #!/usr/bin/env python3
-# ===========================================================
-# 🌿 Cloudflare DNS Manager v6.6 Ultimate Auto-Run Edition
-# Full auto dependency setup + token access + dashboard
-# Compatible: Debian 10-12, Ubuntu 20-24+
-# ===========================================================
+# ==============================================================
+# 🌿 Cloudflare DNS Manager v6.7 Pro Build — MHR Dev Team
+# Real Cloudflare API Integration + Token Auth + Auto Installer
+# ==============================================================
 
-import os, sys, subprocess, time
+import os, sys, subprocess, time, json, requests
 from datetime import datetime
 
-# ─────────────────────────── Auto Install Section ───────────────────────────
-def run_cmd(cmd):
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return result.stdout.strip(), result.stderr.strip()
+# -------------------- Auto Setup --------------------
+def setup_env():
+    cmds = [
+        "sudo apt update -y && sudo apt upgrade -y",
+        "sudo apt install -y python3 python3-pip curl wget nano unzip",
+        "pip3 install colorama requests cryptography pyperclip --break-system-packages -q || pip3 install colorama requests cryptography pyperclip -q"
+    ]
+    for cmd in cmds:
+        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def ensure_system_ready():
-    print("🔧 Checking system dependencies...\n")
-    os.system("sleep 1")
-    
-    # Step 1: Update + Upgrade
-    print("📦 Updating system packages...")
-    os.system("sudo apt update -y && sudo apt upgrade -y")
+try:
+    from colorama import Fore, Style, init
+except ImportError:
+    setup_env()
+    from colorama import Fore, Style, init
 
-    # Step 2: Install essentials
-    essentials = "python3 python3-pip curl nano"
-    print(f"📥 Installing essentials: {essentials}")
-    os.system(f"sudo apt install -y {essentials}")
-
-    # Step 3: Install Python modules
-    modules = ["colorama", "requests", "cryptography", "pyperclip"]
-    for m in modules:
-        print(f"📚 Installing Python module: {m}")
-        os.system(f"pip3 install {m} --break-system-packages -q")
-
-    os.system("clear")
-    print("✅ Environment ready!\n")
-
-# ─────────────────────────── Imports ───────────────────────────
-def safe_imports():
-    try:
-        from colorama import Fore, Style, init
-    except ImportError:
-        ensure_system_ready()
-        from colorama import Fore, Style, init
-    return Fore, Style, init
-
-Fore, Style, init = safe_imports()
 init(autoreset=True)
 
-# ─────────────────────────── Token Validation ───────────────────────────
-def base36_decode(s: str) -> int:
-    return int(s, 36)
+# -------------------- Token Validation --------------------
+def base36_decode(s): return int(s, 36)
 
-def validate_access_key(token: str):
-    try:
-        if "." not in token:
-            print(Fore.RED + "❌ Invalid token format.")
-            sys.exit(1)
-        _, exp_b36 = token.rsplit(".", 1)
-        exp_ts = base36_decode(exp_b36)
-        if time.time() > exp_ts:
-            print(Fore.RED + "⏳ Token expired. Please generate a new key.")
-            sys.exit(1)
-        return exp_ts
-    except Exception as e:
-        print(Fore.RED + f"❌ Token validation error: {e}")
+def validate_access_key(token):
+    if "." not in token:
+        print(Fore.RED + "❌ Invalid token format.")
         sys.exit(1)
+    _, exp = token.rsplit(".", 1)
+    exp_ts = base36_decode(exp)
+    if time.time() > exp_ts:
+        print(Fore.RED + "⏳ Token expired. Please generate a new one.")
+        sys.exit(1)
+    return exp_ts
 
-# ─────────────────────────── UI / Dashboard ───────────────────────────
+# -------------------- Cloudflare API --------------------
+CF_API = "https://api.cloudflare.com/client/v4"
+
+def cf_headers(api_token):
+    return {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
+    }
+
+def create_dns_record(zone_id, name, ip, api_token):
+    payload = {"type": "A", "name": name, "content": ip, "ttl": 120, "proxied": False}
+    r = requests.post(f"{CF_API}/zones/{zone_id}/dns_records", headers=cf_headers(api_token), json=payload)
+    return r.status_code, r.text
+
+def list_dns_records(zone_id, api_token):
+    r = requests.get(f"{CF_API}/zones/{zone_id}/dns_records", headers=cf_headers(api_token))
+    if r.status_code == 200:
+        data = r.json().get("result", [])
+        return [d["name"] for d in data]
+    return []
+
+def delete_dns_record(zone_id, record_id, api_token):
+    r = requests.delete(f"{CF_API}/zones/{zone_id}/dns_records/{record_id}", headers=cf_headers(api_token))
+    return r.status_code
+
+def get_record_id(zone_id, fqdn, api_token):
+    r = requests.get(f"{CF_API}/zones/{zone_id}/dns_records", headers=cf_headers(api_token))
+    if r.status_code == 200:
+        for d in r.json()["result"]:
+            if d["name"] == fqdn:
+                return d["id"]
+    return None
+
+# -------------------- UI --------------------
 def show_header():
-    print(Fore.CYAN + "┌" + "─" * 58 + "┐")
-    print(Fore.GREEN + "│  🌿 Cloudflare DNS Manager v6.6 Ultimate — MHR Dev Team      │")
-    print(Fore.CYAN + "│  🔹 Auto Install · Token Auth · Premium Dashboard             │")
-    print(Fore.CYAN + "└" + "─" * 58 + "┘\n")
+    print(Fore.CYAN + "┌" + "─"*58 + "┐")
+    print(Fore.GREEN + "│  🌿 Cloudflare DNS Manager v6.7 Pro Build — MHR Dev Team     │")
+    print(Fore.CYAN + "│  🔹 Real API · Token Auth · Premium Dashboard                 │")
+    print(Fore.CYAN + "└" + "─"*58 + "┘\n")
 
-def dashboard(domain, zone_id, total_ips, exp_ts, access_key):
-    os.system("clear")
-    show_header()
+def show_token_box(access_key, exp_ts):
     remaining = max(0, int(exp_ts - time.time()))
-    d, r = divmod(remaining, 86400)
-    h, r = divmod(r, 3600)
-    m, s = divmod(r, 60)
-    expire_text = f"{d}d {h}h {m}m {s}s"
-
-    print(Fore.CYAN + "┌" + "─" * 58 + "┐")
-    print(Fore.CYAN + "│ 📂 DOMAIN INFO                                               │")
-    print(Fore.CYAN + "│" + "─" * 58 + "│")
-    print(Fore.WHITE + f"│ 🌐 Domain     : example.com                                  │")
-    print(Fore.WHITE + f"│ 🆔 Zone ID    : 9234x981923x8123                             │")
-    print(Fore.WHITE + f"│ 💻 Total IPs  : 20                                           │")
-    print(Fore.CYAN + "└" + "─" * 58 + "┘\n")
-
-    print(Fore.CYAN + "┌" + "─" * 58 + "┐")
-    print(Fore.CYAN + "│ ⚙️  DNS ACTIONS (AVAILABLE OPTIONS)                         │")
-    print(Fore.CYAN + "│" + "─" * 58 + "│")
-    print(Fore.WHITE + "│ [1] ➤ Create DNS Records                                    │")
-    print(Fore.WHITE + "│ [2] ➤ Delete DNS Records                                    │")
-    print(Fore.WHITE + "│ [3] ➤ List DNS Records                                      │")
-    print(Fore.WHITE + "│ [4] ➤ List DNS (Pro View)                                   │")
-    print(Fore.WHITE + "│ [5] ➤ Exit                                                  │")
-    print(Fore.CYAN + "└" + "─" * 58 + "┘\n")
-
-    choice = input(Fore.YELLOW + "👉 Choose an option (1–5): ").strip()
-    print()
-
-    print(Fore.CYAN + "┌" + "─" * 58 + "┐")
+    d,h = divmod(remaining,3600*24)[0], (remaining%86400)//3600
+    m,s = divmod((remaining%3600),60)
+    print(Fore.CYAN + "┌" + "─"*58 + "┐")
     print(Fore.GREEN + "│  🔑 TOKEN STATUS : ACTIVE ✅                                 │")
     print(Fore.WHITE + f"│  🧩 Access Key   : {access_key[:50]:<44}│")
-    print(Fore.YELLOW + f"│  ⏳ Expires In   : {expire_text:<43}│")
-    print(Fore.CYAN + "└" + "─" * 58 + "┘\n")
+    print(Fore.YELLOW + f"│  ⏳ Expires In   : {d}d {h}h {m}m {s}s{' ' * 26}│")
+    print(Fore.CYAN + "└" + "─"*58 + "┘\n")
 
-    return choice
+# -------------------- Main Menu --------------------
+def main():
+    os.system("clear")
+    show_header()
 
-# ─────────────────────────── DNS Manager (Demo actions) ───────────────────────────
-def main_menu(exp_ts, access_key):
+    ACCESS_KEY = input(Fore.YELLOW + "🔑 Paste Access Key: ").strip()
+    exp_ts = validate_access_key(ACCESS_KEY)
+    api_token = input(Fore.CYAN + "🌐 Enter Cloudflare API Token: ").strip()
+    zone_id = input(Fore.CYAN + "🆔 Enter Zone ID: ").strip()
+    domain = input(Fore.CYAN + "💻 Enter Domain Name: ").strip()
+
     while True:
-        choice = dashboard("example.com", "9234x981923x8123", 20, exp_ts, access_key)
+        os.system("clear")
+        show_header()
+        print(Fore.CYAN + "📂 DOMAIN INFO")
+        print(Fore.WHITE + f"🌐 Domain  : {domain}")
+        print(Fore.WHITE + f"🆔 Zone ID : {zone_id}\n")
+        print(Fore.CYAN + "📘 AVAILABLE OPTIONS")
+        print(" [1] ➤ Create DNS Records")
+        print(" [2] ➤ Delete DNS Records")
+        print(" [3] ➤ List DNS Records")
+        print(" [4] ➤ Pro DNS List View")
+        print(" [5] ➤ Exit\n")
+        show_token_box(ACCESS_KEY, exp_ts)
+        choice = input(Fore.YELLOW + "👉 Choose an option (1–5): ").strip()
+
         if choice == "1":
-            print(Fore.GREEN + "\n🛠️  Creating DNS... (demo)")
-            time.sleep(2)
+            prefix = input("Enter prefix (e.g. us): ").strip() or "a"
+            ips = input("Paste IPs (comma separated): ").strip().split(",")
+            for i, ip in enumerate(ips, start=1):
+                sub = f"{prefix}{i}.{domain}"
+                print(Fore.GREEN + f"Creating {sub} → {ip} ...", end="")
+                code, res = create_dns_record(zone_id, sub, ip.strip(), api_token)
+                print(" ✅" if code == 200 else f" ❌ ({code})")
+            input("Press Enter to return...")
+
         elif choice == "2":
-            print(Fore.RED + "\n🗑️  Deleting DNS... (demo)")
-            time.sleep(2)
+            fqdn = input("Enter full DNS to delete (e.g. us1.example.com): ").strip()
+            rec_id = get_record_id(zone_id, fqdn, api_token)
+            if rec_id:
+                delete_dns_record(zone_id, rec_id, api_token)
+                print(Fore.RED + f"Deleted {fqdn}")
+            else:
+                print(Fore.YELLOW + "Record not found.")
+            input("Press Enter to return...")
+
         elif choice == "3":
-            print(Fore.CYAN + "\n📜 Listing DNS... (demo)")
-            time.sleep(2)
+            dns_list = list_dns_records(zone_id, api_token)
+            print(Fore.CYAN + "\nDNS Records:")
+            for d in dns_list:
+                print(" -", d)
+            input("Press Enter to return...")
+
         elif choice == "4":
-            print(Fore.YELLOW + "\n🔍 Listing DNS (Pro View)... (demo)")
-            time.sleep(2)
+            dns_list = list_dns_records(zone_id, api_token)
+            compact = "~".join([x.split(".")[0] for x in dns_list])
+            print(Fore.GREEN + "\nPro DNS View:\n" + compact)
+            input("Press Enter to return...")
+
         elif choice == "5":
             print(Fore.YELLOW + "\n👋 Exiting... Goodbye!")
-            sys.exit(0)
-        input(Fore.CYAN + "\n🔙 Press Enter to return to dashboard...")
+            break
+        else:
+            print(Fore.RED + "Invalid choice.")
+            time.sleep(1)
 
-# ─────────────────────────── Entry ───────────────────────────
 if __name__ == "__main__":
-    os.system("clear")
-    print(Fore.GREEN + "🌿 Cloudflare DNS Manager v6.6 (Auto Installer Enabled)\n")
-    print(Fore.YELLOW + "🔧 Initializing environment...\n")
-    ensure_system_ready()
-
-    if len(sys.argv) > 1:
-        ACCESS_KEY = sys.argv[1]
-    else:
-        ACCESS_KEY = input(Fore.YELLOW + "🔑 Paste Access Key: ").strip()
-
-    exp_ts = validate_access_key(ACCESS_KEY)
-    main_menu(exp_ts, ACCESS_KEY)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(0)
