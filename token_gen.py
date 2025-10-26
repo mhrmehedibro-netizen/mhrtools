@@ -1,43 +1,98 @@
 #!/usr/bin/env python3
-"""
-token_gen.py
-Cloudflare DNS Manager v6.4 - Token Generator
-Author: MHR Dev Team 🌿
-"""
+# ===========================================================
+# 🌿 MHR Access Key Generator v4.1 Auto-Run Edition
+# Animated · Styled · Auto-save · Clipboard · Auto-Run DNS Script
+# ===========================================================
 
-import argparse, time, json, hmac, hashlib, base64, datetime
+import os, sys, time, secrets, subprocess
+from datetime import datetime, timedelta
 
-def b64u(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+# ---------- Auto-install packages ----------
+def ensure_package(pkg_name):
+    try:
+        __import__(pkg_name.split("[")[0])
+    except ImportError:
+        print(f"📦 Installing module: {pkg_name} ...")
+        subprocess.run([sys.executable, "-m", "pip", "install", pkg_name, "-q"])
 
-def make_token(secret: str, days: int = 5, user_id: str = "") -> (str, int):
-    exp = int(time.time()) + int(days) * 24 * 3600
-    payload = {"exp": exp}
-    if user_id:
-        payload["id"] = user_id
-    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    sig = hmac.new(secret.encode(), payload_json, hashlib.sha256).digest()
-    token = f"{b64u(payload_json)}.{b64u(sig)}"
-    return token, exp
+for pkg in ["colorama", "pyperclip"]:
+    ensure_package(pkg)
+from colorama import Fore, Style, init
+import pyperclip
+init(autoreset=True)
 
+# ---------- helpers ----------
+def base36_encode(num):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if num == 0: return "0"
+    s = ""
+    while num:
+        num, rem = divmod(num, 36)
+        s = digits[rem] + s
+    return s
+
+def grouped_token(core, group=4, sep="-"):
+    return sep.join([core[i:i+group] for i in range(0, len(core), group)])
+
+def generate_core(length=28):
+    tok = secrets.token_urlsafe(length*2)
+    tok = "".join(ch for ch in tok if ch.isalnum())
+    return tok[:length]
+
+def animated_bar(txt="Generating", steps=25, delay=0.03):
+    for i in range(steps):
+        bar = "▰"*(i+1) + "▱"*(steps-i-1)
+        sys.stdout.write(f"\r{Fore.YELLOW}{txt} {bar} {int((i+1)/steps*100)}%")
+        sys.stdout.flush()
+        time.sleep(delay)
+    print()
+
+# ---------- main ----------
 def main():
-    parser = argparse.ArgumentParser(description="Generate signed access token for cf_auto_dns_v6_4.")
-    parser.add_argument("--secret", "-s", required=True, help="Shared secret (must match TOKEN_SECRET)")
-    parser.add_argument("--days", "-d", type=int, default=5, help="Token valid duration in days (default 5)")
-    parser.add_argument("--id", "-i", default="", help="Optional user ID or tag")
-    args = parser.parse_args()
+    os.system("clear")
+    print(Fore.CYAN + "┌" + "─"*64 + "┐")
+    print(Fore.GREEN + "│  🌿 MHR Access Key Generator v4.1 — Auto-Run Edition         │")
+    print(Fore.CYAN + "│  🔹 Animated · Clipboard · Auto-Run DNS Script                │")
+    print(Fore.CYAN + "└" + "─"*64 + "┘\n")
 
-    token, exp = make_token(args.secret, args.days, args.id)
-    exp_str = datetime.datetime.utcfromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print("Select validity:")
+    print(" [1] 1 Hour")
+    print(" [2] 1 Day (default)")
+    print(" [3] 7 Days")
+    print(" [4] 30 Days")
+    ch = input(Fore.YELLOW + "Select (1-4): ").strip() or "2"
+    hours = {"1":1, "2":24, "3":24*7, "4":24*30}.get(ch,"24")
 
-    print("\n🔑 Your Access Token:\n")
-    print(token)
-    print("\n🕒 Expires at:", exp_str)
-    if args.id:
-        print("👤 ID:", args.id)
-    print(f"\n✅ Token valid for {args.days} day(s).")
-    print("\n⚙️ Use this same secret in main script via:\nexport TOKEN_SECRET=\"{}\"".format(args.secret))
-    print("Then run: python3 cf_auto_dns_v6_4_tokened.py\n")
+    animated_bar("🔐 Creating key")
+
+    issued = datetime.utcnow()
+    expiry = issued + timedelta(hours=int(hours))
+    exp_b36 = base36_encode(int(expiry.timestamp()))
+    core = generate_core(28)
+    full_key = f"{grouped_token(core)}.{exp_b36}"
+    pyperclip.copy(full_key)
+
+    print(Fore.CYAN + "\n──────────────────────────────────────────────────────────────")
+    print(Fore.GREEN + "✅ Access Key Generated\n")
+    print(Fore.WHITE + f"📅 Issued  : {issued:%Y-%m-%d %H:%M:%S UTC}")
+    print(Fore.WHITE + f"⏳ Expires : {expiry:%Y-%m-%d %H:%M:%S UTC}")
+    print(Fore.CYAN + "──────────────────────────────────────────────────────────────")
+    print(Fore.GREEN + "🔐 Your Access Key:\n")
+    print(Fore.WHITE + Style.BRIGHT + "╔" + "═"*56 + "╗")
+    print(Fore.YELLOW + Style.BRIGHT + f"  {full_key}")
+    print(Fore.WHITE + Style.BRIGHT + "╚" + "═"*56 + "╝")
+    print(Fore.GREEN + "\n📋 Copied to clipboard!")
+    print(Fore.CYAN + "──────────────────────────────────────────────────────────────")
+
+    if input(Fore.YELLOW + "▶ Run Cloudflare DNS Manager now? [Y/n]: ").lower() in ("", "y"):
+        os.system(f'python3 cf_auto_dns_v6_6_ultimate_auto_run.py "{full_key}"')
+    else:
+        print(Fore.CYAN + "\n✅ You can run manually with:\n"
+              f"python3 cf_auto_dns_v6_6_ultimate_auto_run.py \"{full_key}\"")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(0)
