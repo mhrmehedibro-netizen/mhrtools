@@ -1,27 +1,39 @@
 #!/usr/bin/env python3
 # ===========================================================
-# 🌿 MHR Access Key Generator v4.1 Auto-Run Edition
-# Animated · Styled · Auto-save · Clipboard · Auto-Run DNS Script
+# 🌿 MHR Access Key Generator v4.1 — Full Auto Installer Edition
+# Auto-update · Auto-install · Clipboard Safe · Auto-Run DNS Script
 # ===========================================================
 
 import os, sys, time, secrets, subprocess
 from datetime import datetime, timedelta
 
-# ---------- Auto-install packages ----------
-def ensure_package(pkg_name):
-    try:
-        __import__(pkg_name.split("[")[0])
-    except ImportError:
-        print(f"📦 Installing module: {pkg_name} ...")
-        subprocess.run([sys.executable, "-m", "pip", "install", pkg_name, "-q"])
+# ---------- Auto Dependency Setup ----------
+def auto_setup():
+    print("\n🛠️  Preparing system environment...\n")
+    cmds = [
+        "apt update -y && apt upgrade -y",
+        "apt install -y python3 python3-pip curl nano wget unzip",
+        "apt install -y xclip xsel wl-clipboard",
+        "pip3 install colorama requests cryptography pyperclip --break-system-packages"
+    ]
+    for cmd in cmds:
+        print(f"⚙️ Running: {cmd}")
+        subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("✅ Environment ready!\n")
 
-for pkg in ["colorama", "pyperclip"]:
-    ensure_package(pkg)
+# Run setup only once
+auto_setup()
+
+# ---------- Import after installation ----------
 from colorama import Fore, Style, init
-import pyperclip
 init(autoreset=True)
+try:
+    import pyperclip
+except ImportError:
+    subprocess.run(["pip3", "install", "pyperclip", "--break-system-packages"])
+    import pyperclip
 
-# ---------- helpers ----------
+# ---------- Helper Functions ----------
 def base36_encode(num):
     digits = "0123456789abcdefghijklmnopqrstuvwxyz"
     if num == 0: return "0"
@@ -47,12 +59,12 @@ def animated_bar(txt="Generating", steps=25, delay=0.03):
         time.sleep(delay)
     print()
 
-# ---------- main ----------
+# ---------- Main ----------
 def main():
     os.system("clear")
     print(Fore.CYAN + "┌" + "─"*64 + "┐")
-    print(Fore.GREEN + "│  🌿 MHR Access Key Generator v4.1 — Auto-Run Edition         │")
-    print(Fore.CYAN + "│  🔹 Animated · Clipboard · Auto-Run DNS Script                │")
+    print(Fore.GREEN + "│  🌿 MHR Access Key Generator v4.1 — Full Auto Installer      │")
+    print(Fore.CYAN + "│  🔹 Auto Setup · Clipboard Safe · Auto Run DNS Script        │")
     print(Fore.CYAN + "└" + "─"*64 + "┘\n")
 
     print("Select validity:")
@@ -70,8 +82,15 @@ def main():
     exp_b36 = base36_encode(int(expiry.timestamp()))
     core = generate_core(28)
     full_key = f"{grouped_token(core)}.{exp_b36}"
-    pyperclip.copy(full_key)
 
+    # Safe clipboard copy
+    try:
+        pyperclip.copy(full_key)
+        clip_msg = Fore.GREEN + "📋 Copied to clipboard successfully!"
+    except pyperclip.PyperclipException:
+        clip_msg = Fore.YELLOW + "⚠️  Clipboard not available — skipping copy."
+
+    # Display key
     print(Fore.CYAN + "\n──────────────────────────────────────────────────────────────")
     print(Fore.GREEN + "✅ Access Key Generated\n")
     print(Fore.WHITE + f"📅 Issued  : {issued:%Y-%m-%d %H:%M:%S UTC}")
@@ -81,7 +100,8 @@ def main():
     print(Fore.WHITE + Style.BRIGHT + "╔" + "═"*56 + "╗")
     print(Fore.YELLOW + Style.BRIGHT + f"  {full_key}")
     print(Fore.WHITE + Style.BRIGHT + "╚" + "═"*56 + "╝")
-    print(Fore.GREEN + "\n📋 Copied to clipboard!")
+    print(Fore.CYAN + "──────────────────────────────────────────────────────────────")
+    print(clip_msg)
     print(Fore.CYAN + "──────────────────────────────────────────────────────────────")
 
     if input(Fore.YELLOW + "▶ Run Cloudflare DNS Manager now? [Y/n]: ").lower() in ("", "y"):
