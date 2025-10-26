@@ -282,5 +282,5 @@ def entrypoint():
     sess.headers.update(cf_headers(cf_token))
     main_menu(sess, zone_id, domain)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     entrypoint()
