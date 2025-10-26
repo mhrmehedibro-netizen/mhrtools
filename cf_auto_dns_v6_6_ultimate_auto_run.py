@@ -1,26 +1,53 @@
 #!/usr/bin/env python3
 # ===========================================================
-# 🌿 Cloudflare DNS Manager v6.5 Pro+ — Auto Run Edition
-# Auto-install · Token Argument Ready · One-Step Start
+# 🌿 Cloudflare DNS Manager v6.6 Ultimate Auto-Run Edition
+# Full auto dependency setup + token access + dashboard
+# Compatible: Debian 10-12, Ubuntu 20-24+
 # ===========================================================
 
 import os, sys, subprocess, time
 from datetime import datetime
 
-# ── Auto-install dependencies ───────────────────────────────
-def ensure_deps():
-    try:
-        import colorama
-    except ImportError:
-        print("📦 Installing required module: colorama ...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "colorama"])
-    os.system("clear")
+# ─────────────────────────── Auto Install Section ───────────────────────────
+def run_cmd(cmd):
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return result.stdout.strip(), result.stderr.strip()
 
-ensure_deps()
-from colorama import Fore, Style, init
+def ensure_system_ready():
+    print("🔧 Checking system dependencies...\n")
+    os.system("sleep 1")
+    
+    # Step 1: Update + Upgrade
+    print("📦 Updating system packages...")
+    os.system("sudo apt update -y && sudo apt upgrade -y")
+
+    # Step 2: Install essentials
+    essentials = "python3 python3-pip curl nano"
+    print(f"📥 Installing essentials: {essentials}")
+    os.system(f"sudo apt install -y {essentials}")
+
+    # Step 3: Install Python modules
+    modules = ["colorama", "requests", "cryptography", "pyperclip"]
+    for m in modules:
+        print(f"📚 Installing Python module: {m}")
+        os.system(f"pip3 install {m} --break-system-packages -q")
+
+    os.system("clear")
+    print("✅ Environment ready!\n")
+
+# ─────────────────────────── Imports ───────────────────────────
+def safe_imports():
+    try:
+        from colorama import Fore, Style, init
+    except ImportError:
+        ensure_system_ready()
+        from colorama import Fore, Style, init
+    return Fore, Style, init
+
+Fore, Style, init = safe_imports()
 init(autoreset=True)
 
-# ── Token Validation ───────────────────────────────
+# ─────────────────────────── Token Validation ───────────────────────────
 def base36_decode(s: str) -> int:
     return int(s, 36)
 
@@ -39,11 +66,11 @@ def validate_access_key(token: str):
         print(Fore.RED + f"❌ Token validation error: {e}")
         sys.exit(1)
 
-# ── Dashboard ───────────────────────────────
+# ─────────────────────────── UI / Dashboard ───────────────────────────
 def show_header():
     print(Fore.CYAN + "┌" + "─" * 58 + "┐")
-    print(Fore.GREEN + "│  🌿 Cloudflare DNS Manager v6.5 Pro+ — MHR Dev Team          │")
-    print(Fore.CYAN + "│  🔹 Auto-Run · Token Auth · Beautiful UI                     │")
+    print(Fore.GREEN + "│  🌿 Cloudflare DNS Manager v6.6 Ultimate — MHR Dev Team      │")
+    print(Fore.CYAN + "│  🔹 Auto Install · Token Auth · Premium Dashboard             │")
     print(Fore.CYAN + "└" + "─" * 58 + "┘\n")
 
 def dashboard(domain, zone_id, total_ips, exp_ts, access_key):
@@ -84,6 +111,7 @@ def dashboard(domain, zone_id, total_ips, exp_ts, access_key):
 
     return choice
 
+# ─────────────────────────── DNS Manager (Demo actions) ───────────────────────────
 def main_menu(exp_ts, access_key):
     while True:
         choice = dashboard("example.com", "9234x981923x8123", 20, exp_ts, access_key)
@@ -104,9 +132,13 @@ def main_menu(exp_ts, access_key):
             sys.exit(0)
         input(Fore.CYAN + "\n🔙 Press Enter to return to dashboard...")
 
+# ─────────────────────────── Entry ───────────────────────────
 if __name__ == "__main__":
     os.system("clear")
-    # Check if token was passed as argument
+    print(Fore.GREEN + "🌿 Cloudflare DNS Manager v6.6 (Auto Installer Enabled)\n")
+    print(Fore.YELLOW + "🔧 Initializing environment...\n")
+    ensure_system_ready()
+
     if len(sys.argv) > 1:
         ACCESS_KEY = sys.argv[1]
     else:
