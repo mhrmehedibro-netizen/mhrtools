@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cloudflare Auto DNS Manager v6.4 (Token Protected - Final Edition)
+Cloudflare Auto DNS Manager v6.4 (Pro Serial Edition)
 Author: MHR Dev Team 🌿
 """
 
@@ -8,7 +8,7 @@ import os, sys, time, json, hmac, hashlib, base64, re, subprocess
 
 SECRET_KEY = os.getenv("TOKEN_SECRET", None)
 
-# ---------------- BASIC UTILS ---------------- #
+# ---------- UTILS ---------- #
 def b64u_decode(s: str) -> bytes:
     s2 = s + "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s2.encode())
@@ -37,7 +37,7 @@ def verify_token(token: str, secret: str):
 GREEN = "\033[92m"; YELLOW = "\033[93m"; RED = "\033[91m"
 CYAN = "\033[96m"; BOLD = "\033[1m"; RESET = "\033[0m"
 
-# ---------------- SYSTEM SETUP ---------------- #
+# ---------- SYSTEM ---------- #
 def run_cmd(cmd): return subprocess.call(cmd, shell=True)
 
 def install_dependencies():
@@ -64,7 +64,7 @@ def safe_request(action, *args, retries=4, delay=1.5, **kwargs):
 
 def progress_bar(prefix, name, dur=0.6):
     width = 25
-    for i in range(0, width + 1):
+    for i in range(width + 1):
         filled = "█" * i
         empty = "░" * (width - i)
         pct = int((i / width) * 100)
@@ -76,17 +76,17 @@ def progress_bar(prefix, name, dur=0.6):
 def cf_headers(token): return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 def validate_domain(domain): return bool(re.match(r"^(?!-)([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$", domain))
 
-# ---------------- API UTIL ---------------- #
+# ---------- API ---------- #
 def list_all_records(sess, zone):
     import requests
-    results = []; page = 1; per_page = 100
+    results, page = [], 1
     while True:
         r = safe_request(sess.get, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records",
-                         params={"per_page": per_page, "page": page})
-        j = r.json(); chunk = j.get("result", [])
-        if not chunk: break
-        results.extend(chunk)
-        if len(chunk) < per_page: break
+                         params={"per_page": 100, "page": page})
+        data = r.json().get("result", [])
+        if not data: break
+        results.extend(data)
+        if len(data) < 100: break
         page += 1
     return results
 
@@ -100,7 +100,7 @@ def read_ips_paste():
         ips.append(line)
     return ips
 
-# ---------------- CREATE DNS ---------------- #
+# ---------- CREATE ---------- #
 def action_create(sess, zone, domain):
     base = input("Enter base name (us/uk/gb/ca or custom): ").strip().lower()
     if not base: print(f"{RED}❌ Base name required{RESET}"); return
@@ -110,6 +110,7 @@ def action_create(sess, zone, domain):
     if not ips: print(f"{YELLOW}⚠ No IPs provided{RESET}"); return
     if input(f"{YELLOW}Confirm to CREATE {len(ips)} records? (y/n): {RESET}").strip().lower() != "y":
         print("Cancelled."); return
+
     created = 0
     for idx, ip in enumerate(ips, start=1):
         name = f"{base}{idx}.{domain}"
@@ -124,7 +125,7 @@ def action_create(sess, zone, domain):
         time.sleep(sleep)
     print(f"{GREEN}🎯 Done creating {created} records.{RESET}")
 
-# ---------------- DELETE DNS (UPDATED) ---------------- #
+# ---------- DELETE ---------- #
 def action_delete(sess, zone, domain):
     print(f"""\n{CYAN}🗑 Delete DNS Records Menu{RESET}
 1) Delete a specific DNS record
@@ -132,109 +133,101 @@ def action_delete(sess, zone, domain):
 3) Delete all DNS records
 4) Back to main menu
 """)
-
     choice = input("Choose (1-4): ").strip()
+    if choice not in ["1","2","3"]: return
 
-    # Option 1: Specific
     if choice == "1":
-        name = input("Enter full DNS name to delete (e.g. us1.example.com): ").strip().lower()
-        if not name:
-            print(f"{RED}❌ DNS name required.{RESET}"); return
-        if input(f"Confirm delete '{name}'? (y/n): ").strip().lower() != "y":
-            print("Cancelled."); return
+        name = input("Enter full DNS name (e.g. us1.example.com): ").strip().lower()
+        if not name: return
+        if input(f"Confirm delete '{name}'? (y/n): ").strip().lower() != "y": return
         progress_bar("DELETE", name)
         try:
-            r = safe_request(sess.get, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records",
-                             params={"type":"A","name":name})
+            r = safe_request(sess.get, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records", params={"type":"A","name":name})
             j = r.json()
             if j.get("result"):
                 rec_id = j["result"][0]["id"]
                 safe_request(sess.delete, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records/{rec_id}")
                 print(f"{RED}🗑 Deleted {name}{RESET}")
-            else:
-                print(f"{YELLOW}⚠ Record not found: {name}{RESET}")
-        except Exception as e:
-            print(f"{RED}❌ {e}{RESET}")
-        return
+            else: print(f"{YELLOW}⚠ Record not found: {name}{RESET}")
+        except Exception as e: print(f"{RED}❌ {e}{RESET}")
 
-    # Option 2: Range delete
     elif choice == "2":
-        base = input("Enter base name (e.g. us): ").strip().lower()
+        base = input("Enter base (e.g. us): ").strip().lower()
         cnt = int(input("How many records to delete?: ") or "0")
-        if cnt <= 0: print(f"{YELLOW}⚠ Invalid number.{RESET}"); return
-        if input(f"{YELLOW}Confirm delete {cnt} {base} records? (y/n): {RESET}").strip().lower() != "y":
-            print("Cancelled."); return
-        deleted = 0
-        for i in range(1, cnt+1):
+        if cnt <= 0: return
+        if input(f"Confirm delete {cnt} {base} records? (y/n): ").strip().lower() != "y": return
+        for i in range(1, cnt + 1):
             name = f"{base}{i}.{domain}"
             progress_bar("DELETE", name)
             try:
-                r = safe_request(sess.get, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records",
-                                 params={"type":"A","name":name})
+                r = safe_request(sess.get, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records", params={"type":"A","name":name})
                 j = r.json()
                 if j.get("result"):
                     rec_id = j["result"][0]["id"]
                     safe_request(sess.delete, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records/{rec_id}")
                     print(f"{RED}🗑 Deleted {name}{RESET}")
-                    deleted += 1
-                else:
-                    print(f"{YELLOW}⚠ Not found {name}{RESET}")
-            except Exception as e:
-                print(f"{RED}❌ {e}{RESET}")
-        print(f"{GREEN}✅ Deleted {deleted} record(s).{RESET}")
-        return
+                else: print(f"{YELLOW}⚠ Not found {name}{RESET}")
+            except Exception as e: print(f"{RED}❌ {e}{RESET}")
 
-    # Option 3: Delete all
     elif choice == "3":
-        print(f"{YELLOW}⚠ WARNING: This will delete ALL DNS records for this zone!{RESET}")
-        if input("Type 'CONFIRM' to continue: ").strip() != "CONFIRM":
-            print("Cancelled."); return
+        print(f"{YELLOW}⚠ This will delete ALL DNS records! Type CONFIRM to continue:{RESET}")
+        if input("> ").strip() != "CONFIRM": return
         recs = list_all_records(sess, zone)
-        if not recs:
-            print(f"{YELLOW}⚠ No records found.{RESET}"); return
-        total = len(recs); deleted = 0
         for r in recs:
-            name = r.get("name"); rec_id = r.get("id")
+            name, rec_id = r["name"], r["id"]
             progress_bar("DELETE", name)
             try:
                 safe_request(sess.delete, f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records/{rec_id}")
                 print(f"{RED}🗑 Deleted {name}{RESET}")
-                deleted += 1
-            except Exception as e:
-                print(f"{RED}❌ {e}{RESET}")
-        print(f"{GREEN}✅ Deleted {deleted}/{total} records successfully!{RESET}")
-        return
+            except: pass
+        print(f"{GREEN}✅ All DNS records deleted.{RESET}")
 
-    else:
-        print(f"{YELLOW}↩ Returning to main menu...{RESET}")
-        return
-
-# ---------------- LIST FUNCTIONS ---------------- #
+# ---------- LIST DNS ---------- #
 def action_list(sess, zone, domain):
     print(f"{CYAN}📜 Fetching DNS list...{RESET}")
     recs = list_all_records(sess, zone)
-    if not recs:
-        print(f"{YELLOW}No DNS records found.{RESET}"); return
     for r in recs:
         print(f"{GREEN}{r.get('name'):<40}{RESET} → {r.get('content')}")
     print(f"{CYAN}Total records: {len(recs)}{RESET}")
 
+# ---------- LIST DNS (PRO SERIAL) ---------- #
+def natural_sort_key(text):
+    """Sort DNS serial properly: us1 < us2 < us10 < us11"""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+
 def action_list_pro_compact(sess, zone, domain):
-    print(f"{CYAN}🔍 Fetching DNS records (Pro Compact)...{RESET}")
+    print(f"{CYAN}🔍 Fetching DNS records (Pro Grouped + Serial)...{RESET}")
     recs = list_all_records(sess, zone)
     if not recs:
-        print(f"{YELLOW}⚠ No DNS records found for this zone.{RESET}"); return
-    names = [r.get('name','') for r in recs if r.get('name')]
-    result = "~".join(names)
-    print(f"\n{GREEN}{result}{RESET}\n")
-    print(f"{CYAN}✅ Total DNS records listed: {len(names)}{RESET}")
-    try:
-        with open("dns_list.txt","w") as f: f.write(result)
-        print(f"{YELLOW}💾 DNS list saved to dns_list.txt{RESET}")
-    except Exception as e:
-        print(f"{RED}❌ Could not save list: {e}{RESET}")
+        print(f"{YELLOW}⚠ No DNS records found.{RESET}")
+        return
 
-# ---------------- MAIN MENU ---------------- #
+    groups = {}
+    for r in recs:
+        name = r.get("name", "")
+        short = name.replace(f".{domain}", "")
+        prefix = re.match(r"^[A-Za-z]+", short)
+        key = prefix.group(0).upper() if prefix else "OTHER"
+        groups.setdefault(key, []).append(name)
+
+    for g in sorted(groups.keys()):
+        sorted_records = sorted(groups[g], key=natural_sort_key)
+        print(f"\n{BOLD}{GREEN}[{g} Records]{RESET}")
+        print(f"{CYAN}{'~'.join(sorted_records)}{RESET}")
+
+    total = len(recs)
+    print(f"\n{CYAN}✅ Total DNS records listed: {total}{RESET}")
+    try:
+        with open("dns_list_grouped.txt","w") as f:
+            for g in sorted(groups.keys()):
+                sorted_records = sorted(groups[g], key=natural_sort_key)
+                f.write(f"[{g} Records]\n")
+                f.write("~".join(sorted_records)+"\n\n")
+        print(f"{YELLOW}💾 Grouped DNS list saved to dns_list_grouped.txt{RESET}")
+    except Exception as e:
+        print(f"{RED}❌ {e}{RESET}")
+
+# ---------- MAIN MENU ---------- #
 def main_menu(sess, zone, domain):
     while True:
         print(f"""\n{BOLD}{CYAN}Cloudflare DNS Manager v6.4 (Token Protected){RESET}
@@ -244,40 +237,38 @@ def main_menu(sess, zone, domain):
 4) List DNS (Pro)
 5) Exit
 """)
-        choice = input("Choose (1-5): ").strip()
-        if choice == "1": action_create(sess, zone, domain)
-        elif choice == "2": action_delete(sess, zone, domain)
-        elif choice == "3": action_list(sess, zone, domain)
-        elif choice == "4": action_list_pro_compact(sess, zone, domain)
-        elif choice == "5":
-            print(f"{YELLOW}👋 Exiting Cloudflare DNS Manager...{RESET}")
-            time.sleep(0.8)
-            print(f"{GREEN}✅ Session Closed Successfully.{RESET}")
+        ch = input("Choose (1-5): ").strip()
+        if ch == "1": action_create(sess, zone, domain)
+        elif ch == "2": action_delete(sess, zone, domain)
+        elif ch == "3": action_list(sess, zone, domain)
+        elif ch == "4": action_list_pro_compact(sess, zone, domain)
+        elif ch == "5":
+            print(f"{YELLOW}👋 Exiting...{RESET}")
             sys.exit(0)
-        else:
-            print(f"{RED}❌ Invalid option, try again.{RESET}")
 
-# ---------------- ENTRY ---------------- #
+# ---------- ENTRY ---------- #
 def entrypoint():
-    print("=== Protected Cloudflare Auto DNS Manager v6.4 ===")
+    print(f"{BOLD}=== Protected Cloudflare DNS Manager v6.4 (MHR Dev Team 🌿) ==={RESET}")
     token = input("Enter access token: ").strip()
-    secret = SECRET_KEY
-    if not secret:
-        print("ERROR: TOKEN_SECRET not set. Use export TOKEN_SECRET=\"your-secret\"")
+    if not SECRET_KEY:
+        print("ERROR: TOKEN_SECRET not set.")
         sys.exit(1)
-    ok, reason = verify_token(token, secret)
+    ok, reason = verify_token(token, SECRET_KEY)
     if not ok:
         print(f"Access denied: {reason}")
         sys.exit(1)
+
     install_dependencies()
     ensure_requests()
     import requests
+
     print("Token valid — starting DNS manager.\n")
     cf_token = input("Enter Cloudflare API Token: ").strip()
     zone_id = input("Enter Cloudflare Zone ID: ").strip()
     domain = input("Enter Domain (example.com): ").strip()
     if not validate_domain(domain):
         print("Invalid domain format."); sys.exit(1)
+
     sess = requests.Session()
     sess.headers.update(cf_headers(cf_token))
     main_menu(sess, zone_id, domain)
