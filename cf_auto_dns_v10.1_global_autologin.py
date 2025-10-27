@@ -1,40 +1,44 @@
 #!/usr/bin/env python3
 # ═════════════════════════════════════════════════════════════
-#  Cloudflare DNS Manager v11 GLOBAL EMAIL+KEY MODE
+#  Cloudflare DNS Manager v10.1 GLOBAL AUTO-LOGIN
 #  Made by MHR 🌿  |  MHR Dev Team
 #
 #  Flow:
-#   - Run script
-#   - Script asks:
-#        Cloudflare Email (visible)
-#        Global API Key  (visible)
-#   - Script uses those to talk DIRECT to Cloudflare (X-Auth-Email / X-Auth-Key)
-#   - Script lists ALL zones (domains) in your account
+#   - Checks /root/.cf_global_auth
+#     -> if exists = auto login (email+global key loaded)
+#     -> if not    = ask email + global key (both visible)
+#                    then ask "Save credentials for next time? [y/n]"
+#                    if y = store encoded creds in /root/.cf_global_auth
+#
+#   - Lists all zones
 #   - You pick which domain (1/2/3...)
-#   - Then full control panel opens:
-#        DNS create / random create / delete / list / SSL-TLS / Nameserver / Tools
+#   - Full menu: DNS create/list/delete, SSL/TLS, Nameservers, Tools
 #
-#  No manual zone_id typing
-#  No manual token typing
-#  No saving creds to disk
+#  On Exit (option 9):
+#     -> asks "Logout and clear saved credentials? [y/n]"
+#        if y = deletes /root/.cf_global_auth
 #
-#  Requirements (fresh Debian VPS):
+#  Requirements:
 #     apt update -y && apt install -y python3 python3-pip
 #     pip3 install requests
 #
 #  Run:
-#     python3 cf_auto_dns_v11_global_emailkey.py
+#     python3 cf_auto_dns_v10.1_global_autologin.py
 #
-#  ⚠ SECURITY NOTE:
-#    This script shows your email + global key in terminal (your request).
-#    Do not share screen / do not run on shared VPS.
+#  SECURITY:
+#   - Credentials are stored only if you say "y"
+#   - Stored at /root/.cf_global_auth
+#   - Light obfuscation to avoid plain text
+#   - This script assumes you're running as root on a private VPS
 #
 # ═════════════════════════════════════════════════════════════
 
-import requests, json, sys, time, random, string, re, itertools, threading
+import requests, json, sys, time, random, string, re, os, itertools, threading
 from datetime import datetime
 
 DIV = "────────────────────────────────────────────"
+AUTH_PATH = "/root/.cf_global_auth"
+OBFUSCATION_KEY = "MHR_DEV_TEAM_SUPERKEY🌿"  # fixed small key for xor-ish encode
 
 FLAG_MAP = {
     "us": "🇺🇸",
@@ -81,7 +85,7 @@ def progress_bar(current, total, prefix=""):
         sys.stdout.write("\n")
 
 # ═══════════════════════════════════════
-# Helper utils
+# Small helpers
 # ═══════════════════════════════════════
 
 def natural_sort_key(name: str):
@@ -99,6 +103,7 @@ def timed_input_list(prompt="Paste IPs (one per line). Press Enter twice to fini
     return lines
 
 def random_label():
+    import string, random
     length = random.randint(5, 8)
     chars  = string.ascii_lowercase + string.digits
     return "".join(random.choice(chars) for _ in range(length))
@@ -111,7 +116,70 @@ def cf_headers(email, global_key):
     }
 
 # ═══════════════════════════════════════
-# Cloudflare Global API login flow
+# Obfuscation for saved creds
+# (simple xor-ish string obfuscation)
+# ═══════════════════════════════════════
+
+def _xor_bytes(data_b: bytes, key_b: bytes) -> bytes:
+    out = bytearray()
+    for i, b in enumerate(data_b):
+        out.append(b ^ key_b[i % len(key_b)])
+    return bytes(out)
+
+def encode_auth(email, global_key):
+    payload = json.dumps({
+        "email": email,
+        "global_key": global_key
+    }).encode("utf-8")
+    key_b = OBFUSCATION_KEY.encode("utf-8")
+    enc = _xor_bytes(payload, key_b)
+    return enc.hex()  # store as hex text
+
+def decode_auth(hexdata):
+    try:
+        raw = bytes.fromhex(hexdata.strip())
+        key_b = OBFUSCATION_KEY.encode("utf-8")
+        dec = _xor_bytes(raw, key_b).decode("utf-8", errors="ignore")
+        obj = json.loads(dec)
+        return obj.get("email",""), obj.get("global_key","")
+    except:
+        return "", ""
+
+def save_auth(email, global_key):
+    enc_hex = encode_auth(email, global_key)
+    try:
+        with open(AUTH_PATH, "w") as f:
+            f.write(enc_hex)
+        # lock down perms (root only)
+        try:
+            os.chmod(AUTH_PATH, 0o600)
+        except:
+            pass
+        print("💾 Credentials saved for next time.\n")
+    except Exception as e:
+        print(f"⚠ Could not save creds: {e}\n")
+
+def load_auth():
+    if not os.path.exists(AUTH_PATH):
+        return "", ""
+    try:
+        with open(AUTH_PATH, "r") as f:
+            data = f.read()
+        email, key = decode_auth(data)
+        return email, key
+    except:
+        return "", ""
+
+def clear_auth():
+    if os.path.exists(AUTH_PATH):
+        try:
+            os.remove(AUTH_PATH)
+            print("🧼 Saved credentials cleared.\n")
+        except Exception as e:
+            print(f"⚠ Could not delete creds file: {e}\n")
+
+# ═══════════════════════════════════════
+# Cloudflare Global Login + Zone Picker
 # ═══════════════════════════════════════
 
 def get_all_zones(session):
@@ -164,30 +232,50 @@ def pick_zone_interactive(zones):
         chosen = zones[idx - 1]
         return chosen["id"], chosen["name"]
 
-def login_global_flow():
-    print("🔑 Cloudflare Global Login (Email + Global API Key)")
-    print("   We won't save these. Visible input (your request).")
-    print("   Make sure nobody is screen-sharing now.\n")
+def login_flow_with_autosave():
+    """
+    1. Try auto-load creds from /root/.cf_global_auth
+    2. If not found or broken -> ask user
+    3. Ask to save (y/n)
+    4. Return (session, zone_id, domain, email, global_key)
+    """
+    email, global_key = load_auth()
+    used_saved = False
 
-    email = input("Enter your Cloudflare Email: ").strip()
-    if not email:
-        print("❌ No email provided. Exiting.")
-        sys.exit(1)
+    if email and global_key:
+        print("🔐 Auto-login attempt with saved credentials...")
+        used_saved = True
+    else:
+        print("🔑 Cloudflare Global Login (Email + Global API Key)")
+        print("   Visible input. We'll NOT save unless you say 'y'.\n")
 
-    global_key = input("Enter your Global API Key: ").strip()
-    if not global_key:
-        print("❌ No Global API Key provided. Exiting.")
-        sys.exit(1)
+        email = input("Enter your Cloudflare Email: ").strip()
+        if not email:
+            print("❌ No email provided. Exiting.")
+            sys.exit(1)
 
-    # build session with these headers
+        global_key = input("Enter your Global API Key: ").strip()
+        if not global_key:
+            print("❌ No Global API Key provided. Exiting.")
+            sys.exit(1)
+
+    # Build session
     session = requests.Session()
     session.headers.update(cf_headers(email, global_key))
 
-    # list zones
+    # Test by fetching zones
     zones = get_all_zones(session)
     if zones is None:
         print("❌ Could not retrieve domains from account. Exiting.")
         sys.exit(1)
+
+    # If we didn't used_saved creds, ask to save
+    if not used_saved:
+        ans = input("Save credentials for next time? [y/n]: ").strip().lower()
+        if ans == "y":
+            save_auth(email, global_key)
+        else:
+            print("❌ Not saved. You'll need to enter again next run.\n")
 
     zone_id, domain = pick_zone_interactive(zones)
     if not zone_id or not domain:
@@ -197,10 +285,10 @@ def login_global_flow():
     print(f"\n✅ Selected domain: {domain}")
     print(f"   Zone ID        : {zone_id}\n")
 
-    return session, zone_id, domain
+    return session, zone_id, domain, email, global_key
 
 # ═══════════════════════════════════════
-# CF basic helpers using session (global headers)
+# CF basic helpers
 # ═══════════════════════════════════════
 
 def cf_get(session, url, params=None):
@@ -233,25 +321,14 @@ def get_zone_status(session, zone_id):
         return 0
     return 0
 
-# ═══════════════════════════════════════
-# Permission guard replacement
-# (global key doesn't support /user/tokens/verify like bearer tokens)
-# We'll just do a soft warning + basic test write like DNS create dry-run?
-# We'll keep it simple: just warn.
-# ═══════════════════════════════════════
-
 def permission_guard_soft():
     print("\n🔍 Permission Note")
-    print("   Using Global API Key gives full account access (God Mode).")
-    print("   We will NOT verify granular scopes like token verify.")
-    ans = input("Continue with full-access Global Key? (y/n): ").strip().lower()
-    if ans != "y":
-        print("👋 Exiting.")
-        sys.exit(1)
-    print("✅ Continuing with Global Key.\n")
+    print("   Using Global API Key = FULL ACCESS on account.")
+    print("   We'll continue with that.\n")
+    # no confirm here, smooth flow
 
 # ═══════════════════════════════════════
-# DNS Create (sequential prefix: us1, us2...)
+# DNS Create
 # ═══════════════════════════════════════
 
 def create_dns_records(session, zone_id, domain):
@@ -285,10 +362,8 @@ def create_dns_records(session, zone_id, domain):
 
         if resp.status_code == 200:
             body = {}
-            try:
-                body = resp.json()
-            except:
-                pass
+            try: body = resp.json()
+            except: pass
             if body.get("success"):
                 print(f"\n✅ {sub} → {ip} created successfully.")
             else:
@@ -296,18 +371,12 @@ def create_dns_records(session, zone_id, domain):
                 print(body)
         else:
             print(f"\n❌ HTTP {resp.status_code} for {sub} → {ip}")
-            try:
-                print(resp.text)
-            except:
-                pass
+            try: print(resp.text)
+            except: pass
 
     total_time = time.perf_counter() - start_t
     print(f"\n✔ Done. Total Created: {total}")
     print(f"⏱ Time: {total_time:.2f}s\n")
-
-# ═══════════════════════════════════════
-# DNS Create (random subdomain)
-# ═══════════════════════════════════════
 
 def create_dns_random(session, zone_id, domain):
     ips = timed_input_list("Paste IPs (one per line). Press Enter twice to finish:")
@@ -339,10 +408,8 @@ def create_dns_random(session, zone_id, domain):
 
         if resp.status_code == 200:
             body = {}
-            try:
-                body = resp.json()
-            except:
-                pass
+            try: body = resp.json()
+            except: pass
             if body.get("success"):
                 print(f"\n✅ {sub} → {ip} created successfully.")
             else:
@@ -350,10 +417,8 @@ def create_dns_random(session, zone_id, domain):
                 print(body)
         else:
             print(f"\n❌ HTTP {resp.status_code} for {sub} → {ip}")
-            try:
-                print(resp.text)
-            except:
-                pass
+            try: print(resp.text)
+            except: pass
 
     total_time = time.perf_counter() - start_t
     print(f"\n✔ Done. Total Created: {total}")
@@ -385,10 +450,8 @@ def delete_dns(session, zone_id):
         spin_stop()
 
         results = []
-        try:
-            results = r.json().get("result", [])
-        except:
-            pass
+        try: results = r.json().get("result", [])
+        except: pass
 
         if not results:
             print("❌ Not found.\n")
@@ -402,10 +465,8 @@ def delete_dns(session, zone_id):
 
         if d.status_code == 200:
             body = {}
-            try:
-                body = d.json()
-            except:
-                pass
+            try: body = d.json()
+            except: pass
             if body.get("success"):
                 print(f"🗑️ Deleted: {name}\n")
             else:
@@ -438,7 +499,6 @@ def delete_dns(session, zone_id):
                 session,
                 f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}"
             )
-
             print(f"\n🗑️ Deleted: {nm}")
 
         total_time = time.perf_counter() - start_t
@@ -450,7 +510,7 @@ def delete_dns(session, zone_id):
         return
 
 # ═══════════════════════════════════════
-# DNS List (Normal View)
+# DNS List (Normal / Pro)
 # ═══════════════════════════════════════
 
 def list_normal(session, zone_id):
@@ -472,10 +532,6 @@ def list_normal(session, zone_id):
             f.write(line + "\n")
 
     print("\n📄 Saved to dns_list_normal.txt\n")
-
-# ═══════════════════════════════════════
-# DNS List (Pro View)
-# ═══════════════════════════════════════
 
 def list_pro(session, zone_id):
     stop = spinner_start("⏳ Loading DNS Records")
@@ -506,7 +562,7 @@ def list_pro(session, zone_id):
     print("📄 Saved to dns_list_pro.txt\n")
 
 # ═══════════════════════════════════════
-# Name Server Manager
+# Nameserver view
 # ═══════════════════════════════════════
 
 def show_nameservers(session, zone_id):
@@ -522,10 +578,8 @@ def show_nameservers(session, zone_id):
         return
 
     data = {}
-    try:
-        data = r.json()
-    except:
-        pass
+    try: data = r.json()
+    except: pass
 
     if not data.get("success"):
         print("❌ Failed to fetch nameservers (API error).\n")
@@ -545,7 +599,7 @@ def show_nameservers(session, zone_id):
     input("Press Enter to return to main menu...")
 
 # ═══════════════════════════════════════
-# SSL/TLS Mode Manager
+# SSL/TLS Mode
 # ═══════════════════════════════════════
 
 def ssl_tls_mode_manager(session, zone_id):
@@ -565,10 +619,8 @@ def ssl_tls_mode_manager(session, zone_id):
         return
 
     data = {}
-    try:
-        data = r.json()
-    except:
-        pass
+    try: data = r.json()
+    except: pass
 
     if not data.get("success"):
         print("❌ Failed to fetch SSL mode (API error).\n")
@@ -603,11 +655,8 @@ def ssl_tls_mode_manager(session, zone_id):
         print("⚠ Missing permission. Cannot update SSL mode.\n")
     elif r2.status_code == 200:
         body2 = {}
-        try:
-            body2 = r2.json()
-        except:
-            pass
-
+        try: body2 = r2.json()
+        except: pass
         if body2.get("success"):
             print(f"✅ SSL/TLS mode changed to {new_mode.capitalize()}.\n")
         else:
@@ -618,7 +667,7 @@ def ssl_tls_mode_manager(session, zone_id):
     input("Press Enter to return to main menu...")
 
 # ═══════════════════════════════════════
-# Tools Menu
+# Tools menu
 # ═══════════════════════════════════════
 
 def list_all_domains(session):
@@ -626,10 +675,8 @@ def list_all_domains(session):
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}"
     body = {}
-    try:
-        body = r.json()
-    except:
-        pass
+    try: body = r.json()
+    except: pass
     if not body.get("success"):
         return None, "API error"
     zones = body.get("result", [])
@@ -664,10 +711,8 @@ def add_specific_domain(session):
 
     if resp.status_code == 200:
         body = {}
-        try:
-            body = resp.json()
-        except:
-            pass
+        try: body = resp.json()
+        except: pass
         if body.get("success"):
             result  = body.get("result", {})
             zid     = result.get("id")
@@ -683,10 +728,8 @@ def add_specific_domain(session):
             print(body)
     else:
         print("❌ Failed to add domain.\n")
-        try:
-            print(resp.text + "\n")
-        except:
-            pass
+        try: print(resp.text + "\n")
+        except: pass
 
 def remove_specific_domain(session):
     zones, err = list_all_domains(session)
@@ -728,10 +771,8 @@ def remove_specific_domain(session):
 
     if resp.status_code == 200:
         body = {}
-        try:
-            body = resp.json()
-        except:
-            pass
+        try: body = resp.json()
+        except: pass
         if body.get("success"):
             print(f"🗑️ Domain removed: {dom} (zone_id={zid})\n")
             with open("domain_activity_log.txt", "a") as f:
@@ -741,10 +782,8 @@ def remove_specific_domain(session):
             print(body)
     else:
         print("❌ Failed to remove domain.\n")
-        try:
-            print(resp.text + "\n")
-        except:
-            pass
+        try: print(resp.text + "\n")
+        except: pass
 
 def show_all_domains(session):
     zones, err = list_all_domains(session)
@@ -769,7 +808,7 @@ def show_all_domains(session):
             f.write(L + "\n")
     print("📄 Saved to domain_list.txt\n")
 
-def tools_menu(session, zone_id, domain):
+def tools_menu(session, zone_id):
     while True:
         print("\n🛠 Tools Menu")
         print("━━━━━━━━━━━━━━━━━━━")
@@ -809,7 +848,7 @@ def main_menu_loop(session, zone_id, domain):
         total_dns  = len(list_dns(session, zone_id))
 
         print("\n╭────────────────────────────────────────────╮")
-        print("│ Cloudflare DNS Manager v11 (GLOBAL MODE)   │")
+        print("│ Cloudflare DNS Manager v10.1 (AUTO-LOGIN)  │")
         print("│        Developed by MHR Dev Team 🌿        │")
         print("╰────────────────────────────────────────────╯\n")
 
@@ -845,8 +884,12 @@ def main_menu_loop(session, zone_id, domain):
         elif choice == "7":
             ssl_tls_mode_manager(session, zone_id)
         elif choice == "8":
-            tools_menu(session, zone_id, domain)
+            tools_menu(session, zone_id)
         elif choice == "9":
+            # on exit ask logout clear?
+            ans = input("Logout and clear saved credentials? [y/n]: ").strip().lower()
+            if ans == "y":
+                clear_auth()
             print("👋 Exiting...")
             time.sleep(0.4)
             break
@@ -858,15 +901,9 @@ def main_menu_loop(session, zone_id, domain):
 # ═══════════════════════════════════════
 
 def main():
-    # 1) Ask for e-mail + global key (visible)
-    session, zone_id, domain = login_global_flow()
-
-    # 2) Warn about god mode perms
+    session, zone_id, domain, email, global_key = login_flow_with_autosave()
     permission_guard_soft()
-
-    # 3) Show main menu
     main_menu_loop(session, zone_id, domain)
 
 if __name__ == "__main__":
-    import time, sys
     main()
