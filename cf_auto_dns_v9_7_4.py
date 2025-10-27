@@ -1,25 +1,42 @@
 #!/usr/bin/env python3
 # ════════════════════════════════════════════════════════════════════
-#  Cloudflare DNS Manager v9.7 — MHR Full Unified Build
+#  Cloudflare DNS Manager v9.7.4 — Zone Control Edition
 #  Made by MHR 🌿
 #  Developed & Maintained by MHR Dev Team
-#  Features:
-#   - Auto Login & Logout
-#   - Permission Checker (--check-token)
-#   - DNS Create / Random Create / Delete / List (Normal+Pro)
-#   - Sorted Pro View with Flag Groups
-#   - Tools: Domain Add / Domain Remove / Abuse Check
-#   - Nameserver Viewer
-#   - SSL/TLS Mode Manager (with safe permission handling)
-#   - Animated spinner + progress bar
+#
+#  Highlights:
+#   - Auto Login / Logout (credentials.json)
+#   - DNS Create (serial prefix) / DNS Create (random)
+#   - DNS Delete (single / wipe all)
+#   - DNS List (Normal / Pro) with flags + sorted us1/us2/us10
+#   - Name Server Manager (assigned CF NS)
+#   - SSL/TLS Mode Manager (safe permission aware)
+#   - Tools Menu:
+#         [1] Add Specific Domain        (POST /zones)
+#         [2] Remove Specific Domain     (DELETE /zones/:id)
+#         [3] Abuse Check                (zone status)
+#         [4] Check Token Permissions    (tokens/verify)
+#         [5] Show All Domains           (list zones)
+#   - Domain add/remove logged to domain_activity_log.txt
+#   - Spinner + Progress bar visuals
+#
+#  REQUIREMENTS on VPS (Debian 12+ typically fine after this):
+#     apt update -y && apt install -y python3 python3-pip
+#     pip3 install requests
+#
+#  USAGE:
+#     python3 cf_auto_dns_v9_7_4.py
+#     python3 cf_auto_dns_v9_7_4.py --check-token
+#
 # ════════════════════════════════════════════════════════════════════
 
 import requests, json, os, sys, time, getpass, random, string, re, itertools, threading
 from datetime import datetime
 
 CRED_FILE = "credentials.json"
-DIV      = "────────────────────────────────────────────"
+DIV       = "────────────────────────────────────────────"
 
+# map prefix -> flag for DNS List (Pro View)
 FLAG_MAP = {
     "us": "🇺🇸",
     "uk": "🇬🇧",
@@ -30,14 +47,13 @@ FLAG_MAP = {
     "in": "🇮🇳",
 }
 
-# ─────────────────────────────────
-# Animation helpers
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Spinner + Progress visuals
+# ═════════════════════════════════════════
 
 def spinner_start(text="Processing"):
     """
     start spinner in background, return stop() function
-    shows: <text> | / - \
     """
     done = {"stop": False}
 
@@ -61,29 +77,28 @@ def spinner_start(text="Processing"):
 
     return stop
 
+
 def progress_bar(current, total, prefix=""):
     """
-    ⚙️ Creating (3/10) |██████░░░░░░| 60%
-    compact short bar, per-step feedback
+    Compact progress bar: ⚙️ Creating (3/10) |██████░░░░░░| 60%
     """
-    width = 12
-    ratio = (current / total) if total else 1
+    width  = 12
+    ratio  = (current / total) if total else 1
     filled = int(ratio * width)
-    bar = "█" * filled + "░" * (width - filled)
-    pct = int(ratio * 100)
+    bar    = "█" * filled + "░" * (width - filled)
+    pct    = int(ratio * 100)
     sys.stdout.write(f"\r{prefix} ({current}/{total}) |{bar}| {pct}%")
     sys.stdout.flush()
     if current == total:
         sys.stdout.write("\n")
 
-# ─────────────────────────────────
-# Helpers: sorting, input batching
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Helpers
+# ═════════════════════════════════════════
 
 def natural_sort_key(name: str):
     """
-    Ensures us1, us2, us10 sorts in numeric order,
-    not (us1, us10, us2)
+    Sort like us1, us2, us10 instead of us1, us10, us2
     """
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split(r'([0-9]+)', name)]
@@ -100,17 +115,17 @@ def timed_input_list(prompt="Paste IPs (one per line). Press Enter twice to fini
 
 def random_label():
     length = random.randint(5, 8)
-    chars = string.ascii_lowercase + string.digits
+    chars  = string.ascii_lowercase + string.digits
     return "".join(random.choice(chars) for _ in range(length))
 
-# ─────────────────────────────────
-# Credential / auth handling
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Credentials / Auth
+# ═════════════════════════════════════════
 
 def cf_headers(token):
     return {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        "Content-Type":  "application/json"
     }
 
 def save_credentials(token, zone_id, domain):
@@ -146,18 +161,15 @@ def get_auth():
         save_credentials(token, zone_id, domain)
     return token, zone_id, domain
 
-# ─────────────────────────────────
-# Cloudflare request helpers
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Cloudflare basic helpers
+# ═════════════════════════════════════════
 
 def cf_get(session, url, params=None):
     return session.get(url, params=params)
 
 def cf_post(session, url, payload):
     return session.post(url, json=payload)
-
-def cf_put(session, url, payload):
-    return session.put(url, json=payload)
 
 def cf_patch(session, url, payload):
     return session.patch(url, json=payload)
@@ -166,7 +178,6 @@ def cf_delete(session, url):
     return session.delete(url)
 
 def list_dns(session, zone_id):
-    # first page default 100
     r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records")
     data = r.json()
     return data.get("result", [])
@@ -175,15 +186,144 @@ def get_zone_status(session, zone_id):
     r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
     if r.status_code == 200:
         status = r.json().get("result", {}).get("status", "")
-        # treat suspended / locked / hold as flagged
+        # suspended / locked / hold = flagged
         if status in ["suspended", "locked", "hold"]:
             return 1
         return 0
     return 0
 
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Domain / Zone helpers
+# ═════════════════════════════════════════
+
+def list_all_domains(session):
+    """
+    Return list of (zone_id, name, status)
+    """
+    r = cf_get(session, "https://api.cloudflare.com/client/v4/zones")
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    data = r.json()
+    if not data.get("success"):
+        return None, "API error"
+    zones = data.get("result", [])
+    out = []
+    for z in zones:
+        out.append({
+            "id": z.get("id", ""),
+            "name": z.get("name", ""),
+            "status": z.get("status", "")
+        })
+    return out, None
+
+def add_specific_domain(session, new_domain):
+    """
+    Add domain by calling POST /zones
+    """
+    stop = spinner_start("🧩 Adding Domain")
+    resp = cf_post(
+        session,
+        "https://api.cloudflare.com/client/v4/zones",
+        {"name": new_domain, "jump_start": True}
+    )
+    stop()
+
+    if resp.status_code == 200 and resp.json().get("success"):
+        result = resp.json().get("result", {})
+        zone_id = result.get("id")
+        status  = result.get("status")
+        print("✅ Domain added.")
+        print("   Domain :", new_domain)
+        print("   Zone ID:", zone_id)
+        print("   Status :", status, "\n")
+        # log
+        with open("domain_activity_log.txt", "a") as f:
+            f.write(f"[{datetime.utcnow().isoformat()}] ADDED {new_domain} zone_id={zone_id} status={status}\n")
+    else:
+        print("❌ Failed to add domain.\n")
+        print(resp.text + "\n")
+
+def remove_specific_domain(session):
+    """
+    Show all zones, pick one by number, delete /zones/:id
+    """
+    zones, err = list_all_domains(session)
+    if err or zones is None:
+        print(f"❌ Could not list domains ({err}).\n")
+        return
+
+    if not zones:
+        print("⚠ No domains found on this token.\n")
+        return
+
+    print(f"\n🌐 Total Domains: {len(zones)}")
+    print("────────────────────────────")
+    for i, z in enumerate(zones, start=1):
+        print(f"{i}) {z['name']}  → {z['status']}  [{z['id']}]")
+    print("────────────────────────────\n")
+
+    pick = input("Enter number to remove (or Enter to cancel): ").strip()
+    if not pick.isdigit():
+        print("❌ Cancelled.\n")
+        return
+
+    idx = int(pick)
+    if idx < 1 or idx > len(zones):
+        print("❌ Invalid selection.\n")
+        return
+
+    target = zones[idx-1]
+    dom    = target["name"]
+    zid    = target["id"]
+
+    sure = input(f"⚠ Really DELETE zone {dom}? (y/n): ").lower()
+    if sure != "y":
+        print("❌ Cancelled.\n")
+        return
+
+    stop = spinner_start("🗑️ Deleting Domain Zone")
+    resp = cf_delete(session, f"https://api.cloudflare.com/client/v4/zones/{zid}")
+    stop()
+
+    if resp.status_code == 200 and resp.json().get("success"):
+        print(f"🗑️ Domain removed: {dom} (zone_id={zid})\n")
+        with open("domain_activity_log.txt", "a") as f:
+            f.write(f"[{datetime.utcnow().isoformat()}] REMOVED {dom} zone_id={zid}\n")
+    else:
+        print("❌ Failed to remove domain.\n")
+        print(resp.text + "\n")
+
+def show_all_domains(session):
+    """
+    List all domains in account, save to domain_list.txt
+    """
+    zones, err = list_all_domains(session)
+    if err or zones is None:
+        print(f"❌ Could not list domains ({err}).\n")
+        return
+
+    if not zones:
+        print("⚠ No domains found on this token.\n")
+        return
+
+    print(f"\n🌐 Total Domains: {len(zones)}")
+    print("────────────────────────────")
+    lines = []
+    for i, z in enumerate(zones, start=1):
+        line = f"{i}) {z['name']}  → {z['status']}  [zone_id={z['id']}]"
+        lines.append(line)
+        print(line)
+    print("────────────────────────────\n")
+
+    with open("domain_list.txt", "w") as f:
+        for L in lines:
+            f.write(L + "\n")
+
+    print("📄 Saved to domain_list.txt\n")
+
+# ═════════════════════════════════════════
 # Permission checker
-# ─────────────────────────────────
+# ═════════════════════════════════════════
 
 def check_token_permissions(token):
     print("\n🔍 Checking Cloudflare Token Permissions...")
@@ -194,7 +334,8 @@ def check_token_permissions(token):
     stop()
 
     if r.status_code != 200:
-        print("❌ Failed to verify token (HTTP error).\n")
+        print("❌ Failed to verify token (HTTP error).")
+        print(f"   HTTP Code: {r.status_code}\n")
         return
 
     data = r.json()
@@ -204,14 +345,16 @@ def check_token_permissions(token):
 
     policies = data["result"].get("policies", [])
     print("\n✅ Token Verified. Permissions:")
+    if not policies:
+        print("   (No explicit policy list from API)")
     for p in policies:
         for perm in p.get("permission_groups", []):
             print("  •", perm.get("name"))
     print("\n📜 Permission check complete!\n")
 
-# ─────────────────────────────────
-# DNS Create (serial prefix)
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# DNS Create (serial prefix e.g. us1, us2...)
+# ═════════════════════════════════════════
 
 def create_dns_records(session, zone_id, domain):
     base = input("\nBase name (us/uk/ca/custom): ").strip().lower()
@@ -227,6 +370,7 @@ def create_dns_records(session, zone_id, domain):
     for idx, ip in enumerate(ips, start=1):
         sub = f"{base}{idx}.{domain}"
         progress_bar(idx, total, prefix="⚙️ Creating")
+
         payload = {
             "type":    "A",
             "name":    sub,
@@ -234,9 +378,13 @@ def create_dns_records(session, zone_id, domain):
             "ttl":     1,
             "proxied": False
         }
-        resp = cf_post(session,
-                       f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-                       payload)
+
+        resp = cf_post(
+            session,
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+            payload
+        )
+
         if resp.status_code == 200 and resp.json().get("success"):
             print(f"\n✅ {sub} → {ip} created successfully.")
         else:
@@ -247,12 +395,12 @@ def create_dns_records(session, zone_id, domain):
     print(f"\n✔ Done. Total Created: {total}")
     print(f"⏱ Time: {total_time:.2f}s\n")
 
-# ─────────────────────────────────
-# DNS Create (random labels 5-8 char)
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# DNS Create (random 5–8 char label)
+# ═════════════════════════════════════════
 
 def create_dns_random(session, zone_id, domain):
-    ips  = timed_input_list("Paste IPs (one per line). Press Enter twice to finish:")
+    ips = timed_input_list("Paste IPs (one per line). Press Enter twice to finish:")
     if not ips:
         print("❌ No IPs provided. Cancelled.\n")
         return
@@ -264,6 +412,7 @@ def create_dns_random(session, zone_id, domain):
     for idx, ip in enumerate(ips, start=1):
         sub = f"{random_label()}.{domain}"
         progress_bar(idx, total, prefix="⚙️ Creating")
+
         payload = {
             "type":    "A",
             "name":    sub,
@@ -271,9 +420,13 @@ def create_dns_random(session, zone_id, domain):
             "ttl":     1,
             "proxied": False
         }
-        resp = cf_post(session,
-                       f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-                       payload)
+
+        resp = cf_post(
+            session,
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+            payload
+        )
+
         if resp.status_code == 200 and resp.json().get("success"):
             print(f"\n✅ {sub} → {ip} created successfully.")
         else:
@@ -284,9 +437,9 @@ def create_dns_random(session, zone_id, domain):
     print(f"\n✔ Done. Total Created: {total}")
     print(f"⏱ Time: {total_time:.2f}s\n")
 
-# ─────────────────────────────────
-# DNS Delete Menu
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# DNS Delete
+# ═════════════════════════════════════════
 
 def delete_dns(session, zone_id):
     print("\n🧹 DNS Delete Menu")
@@ -300,20 +453,27 @@ def delete_dns(session, zone_id):
         if not name:
             print("❌ No name given.\n")
             return
-        stop = spinner_start("🗑️ Deleting record")
-        r = cf_get(session,
-                   f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-                   params={"name": name})
+
+        spin_stop = spinner_start("🗑️ Deleting record")
+        r = cf_get(
+            session,
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+            params={"name": name}
+        )
         data = r.json()
         results = data.get("result", [])
         if not results:
-            stop()
+            spin_stop()
             print("❌ Not found.\n")
             return
+
         rid = results[0]["id"]
-        d   = cf_delete(session,
-                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}")
-        stop()
+        d   = cf_delete(
+            session,
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}"
+        )
+        spin_stop()
+
         if d.status_code == 200 and d.json().get("success"):
             print(f"🗑️ Deleted: {name}\n")
         else:
@@ -323,10 +483,12 @@ def delete_dns(session, zone_id):
     if choice == "2":
         c1 = input("⚠️ Delete ALL DNS records? (y/n): ").lower()
         if c1 != "y":
-            print("❌ Cancelled.\n"); return
+            print("❌ Cancelled.\n")
+            return
         c2 = input("Confirm again (y/n): ").lower()
         if c2 != "y":
-            print("❌ Cancelled.\n"); return
+            print("❌ Cancelled.\n")
+            return
 
         recs = list_dns(session, zone_id)
         total = len(recs)
@@ -337,8 +499,12 @@ def delete_dns(session, zone_id):
             rid = rec["id"]
             nm  = rec["name"]
             progress_bar(idx, total, prefix="🗑️ Removing")
-            cf_delete(session,
-                      f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}")
+
+            cf_delete(
+                session,
+                f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}"
+            )
+
             print(f"\n🗑️ Deleted: {nm}")
 
         total_time = time.perf_counter() - start_t
@@ -349,14 +515,14 @@ def delete_dns(session, zone_id):
     if choice == "3":
         return
 
-# ─────────────────────────────────
-# DNS List (Normal View)
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# DNS List (Normal)
+# ═════════════════════════════════════════
 
 def list_normal(session, zone_id):
-    stop = spinner_start("⏳ Loading DNS Records")
+    spin_stop = spinner_start("⏳ Loading DNS Records")
     recs = list_dns(session, zone_id)
-    stop()
+    spin_stop()
     print("✅ DNS Records Loaded.\n")
 
     lines = []
@@ -373,14 +539,14 @@ def list_normal(session, zone_id):
 
     print("\n📄 Saved to dns_list_normal.txt\n")
 
-# ─────────────────────────────────
-# DNS List (Pro View) – flags + sorted
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# DNS List (Pro View)
+# ═════════════════════════════════════════
 
 def list_pro(session, zone_id):
-    stop = spinner_start("⏳ Loading DNS Records")
+    spin_stop = spinner_start("⏳ Loading DNS Records")
     recs = list_dns(session, zone_id)
-    stop()
+    spin_stop()
     print("✅ DNS Records Loaded Successfully!\n")
 
     groups = {}
@@ -405,18 +571,19 @@ def list_pro(session, zone_id):
 
     print("📄 Saved to dns_list_pro.txt\n")
 
-# ─────────────────────────────────
-# Nameserver Manager (Option 6)
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Name Server Manager (Option 6)
+# ═════════════════════════════════════════
 
 def show_nameservers(session, zone_id):
     print("\n🔍 Fetching Cloudflare Nameservers...")
-    stop = spinner_start("📡 Getting nameservers")
+    spin_stop = spinner_start("📡 Getting nameservers")
     r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
-    stop()
+    spin_stop()
 
     if r.status_code != 200:
-        print("❌ Failed to fetch nameservers (HTTP error).\n")
+        print("❌ Failed to fetch nameservers (HTTP error).")
+        print(f"   HTTP Code: {r.status_code}\n")
         input("Press Enter to return...")
         return
 
@@ -438,22 +605,23 @@ def show_nameservers(session, zone_id):
     print("\n✅ Nameservers fetched successfully!\n")
     input("Press Enter to return to main menu...")
 
-# ─────────────────────────────────
+# ═════════════════════════════════════════
 # SSL/TLS Mode Manager (Option 7)
-# ─────────────────────────────────
+# ═════════════════════════════════════════
 
 def ssl_tls_mode_manager(session, zone_id):
     print("\n🔐 Checking current SSL/TLS Mode...")
-    stop = spinner_start("🔍 Fetching SSL mode")
+    spin_stop = spinner_start("🔍 Fetching SSL mode")
     r = session.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/settings/ssl")
-    stop()
+    spin_stop()
 
     if r.status_code == 403:
         print("⚠ Missing Zone Settings:Edit permission. Please recreate token.\n")
         input("Press Enter to return...")
         return
     if r.status_code != 200:
-        print("❌ Failed to fetch SSL mode (HTTP error).\n")
+        print("❌ Failed to fetch SSL mode (HTTP error).")
+        print(f"   HTTP Code: {r.status_code}\n")
         input("Press Enter to return...")
         return
 
@@ -465,7 +633,11 @@ def ssl_tls_mode_manager(session, zone_id):
 
     current_mode = data["result"]["value"].capitalize()
     print(f"🌐 Current SSL/TLS Mode: {current_mode}\n")
-    print("Available Modes:\n 1) Flexible\n 2) Full\n 3) Strict\n")
+
+    print("Available Modes:")
+    print(" 1) Flexible")
+    print(" 2) Full")
+    print(" 3) Strict\n")
     choice = input("Select new mode (1-3) or Enter to skip: ").strip()
 
     mode_map = {"1": "flexible", "2": "full", "3": "strict"}
@@ -476,13 +648,13 @@ def ssl_tls_mode_manager(session, zone_id):
 
     new_mode = mode_map[choice]
     print(f"🔄 Updating to {new_mode.capitalize()}...")
-    stop = spinner_start("⚙️ Applying")
+    spin_stop = spinner_start("⚙️ Applying")
     r2 = session.patch(
         f"https://api.cloudflare.com/client/v4/zones/{zone_id}/settings/ssl",
         headers=session.headers,
         json={"value": new_mode}
     )
-    stop()
+    spin_stop()
 
     if r2.status_code == 403:
         print("⚠ Missing Zone Settings:Edit permission. Cannot update SSL mode.\n")
@@ -493,94 +665,58 @@ def ssl_tls_mode_manager(session, zone_id):
 
     input("Press Enter to return to main menu...")
 
-# ─────────────────────────────────
+# ═════════════════════════════════════════
 # Tools Menu (Option 8)
-# ─────────────────────────────────
+# ═════════════════════════════════════════
 
-def tools_menu(session, zone_id, domain):
+def tools_menu(session, zone_id, domain, token):
     while True:
         print("\n🛠 Tools Menu")
-        print("1) Domain Add")
-        print("2) Domain Remove (clear ALL DNS)")
-        print("3) Abuse Check")
-        print("4) Back")
+        print("━━━━━━━━━━━━━━━━━━━")
+        print("[1] Add Specific Domain")
+        print("[2] Remove Specific Domain")
+        print("[3] Abuse Check")
+        print("[4] Check Token Permissions")
+        print("[5] Show All Domains")
+        print("━━━━━━━━━━━━━━━━━━━")
+
         c = input("Choose: ").strip()
 
         if c == "1":
-            new_domain = input("Enter new domain to add: ").strip()
-            if not new_domain:
+            new_dom = input("Enter domain to add: ").strip()
+            if not new_dom:
                 print("❌ No domain.\n")
                 continue
-            stop = spinner_start("🧩 Adding Domain")
-            resp = cf_post(session,
-                           "https://api.cloudflare.com/client/v4/zones",
-                           {"name": new_domain, "jump_start": True})
-            stop()
-            if resp.status_code == 200 and resp.json().get("success"):
-                result = resp.json().get("result", {})
-                print("✅ Domain added.")
-                print("Zone ID:", result.get("id"))
-                print("Status :", result.get("status"), "\n")
-                with open("added_domains.txt", "a") as f:
-                    f.write(f"{datetime.utcnow().isoformat()} {new_domain} {result.get('id')} {result.get('status')}\n")
-            else:
-                print("❌ Failed to add domain.\n")
-                print(resp.text + "\n")
+            add_specific_domain(session, new_dom)
 
         elif c == "2":
-            confirm = input(f"⚠️ Clear ALL DNS for {domain}? (y/n): ").lower()
-            if confirm != "y":
-                print("❌ Cancelled.\n")
-                continue
-            confirm2 = input("Confirm again (y/n): ").lower()
-            if confirm2 != "y":
-                print("❌ Cancelled.\n")
-                continue
-
-            stop = spinner_start("🧹 Cleaning Domain")
-            recs = list_dns(session, zone_id)
-            stop()
-
-            total = len(recs)
-            print(f"\n🧹 Deleting {total} DNS records...\n")
-            start_t = time.perf_counter()
-
-            for idx, rec in enumerate(recs, start=1):
-                rid = rec["id"]
-                nm  = rec["name"]
-                progress_bar(idx, total, prefix="🗑️ Removing")
-                cf_delete(session,
-                          f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{rid}")
-                print(f"\n🗑️ Deleted: {nm}")
-
-            total_time = time.perf_counter() - start_t
-            print(f"\n✅ Domain cleaned. Total Removed: {total}")
-            print(f"⏱ Time: {total_time:.2f}s\n")
-
-            with open("domain_remove_log.txt", "a") as f:
-                f.write(f"{datetime.utcnow().isoformat()} {domain} removed {total} records\n")
+            remove_specific_domain(session)
 
         elif c == "3":
-            stop = spinner_start("🔍 Scanning for Abuse / Suspension")
+            spin_stop = spinner_start("🔍 Scanning for Abuse / Suspension")
             status_flag = get_zone_status(session, zone_id)
-            stop()
+            spin_stop()
             if status_flag == 0:
                 print("✅ Clean. No abuse/suspension detected.\n")
             else:
                 print("⚠️ Possible suspension / hold detected.\n")
 
         elif c == "4":
-            break
+            check_token_permissions(token)
+
+        elif c == "5":
+            show_all_domains(session)
 
         else:
-            print("❌ Invalid.\n")
+            # any other key = back
+            break
 
-# ─────────────────────────────────
-# Main Menu Loop
-# ─────────────────────────────────
+# ═════════════════════════════════════════
+# Main Menu
+# ═════════════════════════════════════════
 
 def main():
-    # fast path: only permission test, no menu
+    # one-off permission check mode
     if len(sys.argv) > 1 and sys.argv[1] == "--check-token":
         token = getpass.getpass("Enter Cloudflare API Token: ").strip()
         check_token_permissions(token)
@@ -600,8 +736,8 @@ def main():
         total_dns  = len(list_dns(session, zone_id))
 
         print("\n╭────────────────────────────────────────────╮")
-        print("│ Cloudflare DNS Manager v9.7 — MHR Edition │")
-        print("│   Developed by MHR Dev Team 🌿            │")
+        print("│ Cloudflare DNS Manager v9.7.4 — MHR Edition │")
+        print("│    Developed by MHR Dev Team 🌿             │")
         print("╰────────────────────────────────────────────╯\n")
 
         print(f" Domain              : {domain}")
@@ -616,12 +752,11 @@ def main():
         print(" [6] Name Server Manager")
         print(" [7] SSL/TLS Mode Manager")
         print(" [8] Tools")
-        print(" [9] Check Token Permissions")
-        print(" [10] Logout")
-        print(" [11] Exit")
+        print(" [9] Logout")
+        print(" [10] Exit")
         print(DIV)
 
-        choice = input(" Select Option (1-11): ").strip()
+        choice = input(" Select Option (1-10): ").strip()
 
         if choice == "1":
             create_dns_records(session, zone_id, domain)
@@ -638,13 +773,11 @@ def main():
         elif choice == "7":
             ssl_tls_mode_manager(session, zone_id)
         elif choice == "8":
-            tools_menu(session, zone_id, domain)
+            tools_menu(session, zone_id, domain, token)
         elif choice == "9":
-            check_token_permissions(token)
-        elif choice == "10":
             delete_credentials()
             break
-        elif choice == "11":
+        elif choice == "10":
             print("👋 Exiting...")
             time.sleep(0.4)
             break
