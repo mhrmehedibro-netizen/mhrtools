@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────
-#  Cloudflare DNS Manager v9.4 (MHR Full Visual Edition)
+#  Cloudflare DNS Manager v9.5 (MHR Full Visual Edition)
 #  Made by MHR 🌿
 #  Developed & Maintained by MHR Dev Team
 #  Visual Flow • Progress Bars • Flagged Pro View
@@ -11,10 +11,8 @@ from datetime import datetime
 
 CRED_FILE = "credentials.json"
 
-# divider
 DIV = "────────────────────────────────────────────"
 
-# map prefix -> flag for Pro View
 FLAG_MAP = {
     "us": "🇺🇸",
     "uk": "🇬🇧",
@@ -51,15 +49,13 @@ def spinner_start(text="Processing"):
 
     def stop():
         done["stop"] = True
-        # tiny sleep so spinner can clear
         time.sleep(0.15)
 
     return stop
 
 def progress_bar(current, total, prefix=""):
     """
-    draw a short progress bar like:
-    ⚙️ Creating (3/10) |██████░░░░| 60%
+    ⚙️ Creating (3/10) |██████░░░░░░| 60%
     """
     width = 12
     ratio = (current / total) if total else 1
@@ -70,6 +66,23 @@ def progress_bar(current, total, prefix=""):
     sys.stdout.flush()
     if current == total:
         sys.stdout.write("\n")
+
+def natural_sort_key(name: str):
+    """
+    Makes sure us1, us2, us10 sort in numeric order
+    """
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split(r'([0-9]+)', name)]
+
+def timed_input_list(prompt="Paste IPs (one per line). Press Enter twice to finish:"):
+    print(prompt)
+    lines = []
+    while True:
+        line = input().strip()
+        if line == "":
+            break
+        lines.append(line)
+    return lines
 
 # -----------------------
 # AUTH / CREDENTIALS
@@ -127,11 +140,15 @@ def cf_post(session, url, payload):
 def cf_put(session, url, payload):
     return session.put(url, json=payload)
 
+def cf_patch(session, url, payload):
+    # Cloudflare SSL settings actually wants PATCH
+    return session.patch(url, json=payload)
+
 def cf_delete(session, url):
     return session.delete(url)
 
 def list_dns(session, zone_id):
-    # grab first 100 only for now (Cloudflare default per_page=100)
+    # 100 per page default
     r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records")
     data = r.json()
     return data.get("result", [])
@@ -140,32 +157,10 @@ def get_zone_status(session, zone_id):
     r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
     if r.status_code == 200:
         status = r.json().get("result", {}).get("status", "")
-        # treat suspended/locked/etc as flagged
         if status in ["suspended", "locked", "hold"]:
             return 1
         return 0
     return 0
-
-def natural_sort_key(name: str):
-    """
-    Makes sure us1, us2, us10 sort in numeric order
-    """
-    return [int(text) if text.isdigit() else text.lower()
-            for text in re.split(r'([0-9]+)', name)]
-
-# -----------------------
-# INPUT HELPERS
-# -----------------------
-
-def timed_input_list(prompt="Paste IPs (one per line). Press Enter twice to finish:"):
-    print(prompt)
-    lines = []
-    while True:
-        line = input().strip()
-        if line == "":
-            break
-        lines.append(line)
-    return lines
 
 # -----------------------
 # FEATURE: CREATE DNS (SERIAL PREFIX)
@@ -307,7 +302,7 @@ def delete_dns(session, zone_id):
         return
 
 # -----------------------
-# FEATURE: LIST DNS (NORMAL)
+# FEATURE: LIST DNS (NORMAL VIEW)
 # -----------------------
 
 def list_normal(session, zone_id):
@@ -335,13 +330,11 @@ def list_normal(session, zone_id):
 # -----------------------
 
 def list_pro(session, zone_id):
-    # animated load
     spin_stop = spinner_start("⏳ Loading DNS Records")
     recs = list_dns(session, zone_id)
     spin_stop()
     print("✅ DNS Records Loaded Successfully!\n")
 
-    # group by prefix
     groups = {}
     for r in recs:
         full = r.get("name", "")
@@ -350,7 +343,6 @@ def list_pro(session, zone_id):
         prefix = m.group(1).lower() if m else "other"
         groups.setdefault(prefix, []).append(full)
 
-    # serialize with numeric order
     with open("dns_list_pro.txt", "w") as f:
         for prefix, names in groups.items():
             names.sort(key=natural_sort_key)
@@ -366,9 +358,87 @@ def list_pro(session, zone_id):
     print("📄 Saved to dns_list_pro.txt\n")
 
 # -----------------------
-# (OPTIONAL) EXTRA FEATURES:
-# Name Server Manager / SSL / Tools
-# For now, showing stubs (visual hooks ready)
+# FEATURE: NAME SERVER MANAGER (Option 6)
+# -----------------------
+
+def show_nameservers(session, zone_id):
+    print("\n🔍 Fetching Cloudflare Nameservers...")
+    spin_stop = spinner_start("📡 Getting nameservers")
+    r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
+    spin_stop()
+
+    if r.status_code != 200:
+        print("❌ Failed to fetch nameservers (HTTP error).\n")
+        return
+
+    data = r.json()
+    if not data.get("success"):
+        print("❌ Failed to fetch nameservers (API error).\n")
+        return
+
+    ns_list = data["result"].get("name_servers", [])
+    if not ns_list:
+        print("⚠ No nameservers found for this zone (maybe not active yet).\n")
+        input("Press Enter to return to menu...")
+        return
+
+    print("\n📡 Current Cloudflare Nameservers:")
+    for i, ns in enumerate(ns_list, start=1):
+        print(f" {i}. {ns}")
+    print("\n✅ Nameservers fetched successfully!\n")
+    input("Press Enter to return to main menu...")
+
+# -----------------------
+# FEATURE: SSL/TLS MODE MANAGER (Option 7)
+# -----------------------
+
+def ssl_tls_mode_manager(session, zone_id):
+    print("\n🔐 Checking current SSL/TLS Mode...")
+    spin_stop = spinner_start("🔍 Fetching SSL mode")
+    r = session.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/settings/ssl")
+    spin_stop()
+
+    if r.status_code != 200:
+        print("❌ Failed to fetch SSL mode (HTTP error).\n")
+        return
+
+    data = r.json()
+    if not data.get("success"):
+        print("❌ Failed to fetch SSL mode (API error).\n")
+        return
+
+    current_mode = data["result"]["value"].capitalize()
+    print(f"🌐 Current SSL/TLS Mode: {current_mode}\n")
+
+    print("Available Modes:")
+    print(" 1) Flexible")
+    print(" 2) Full")
+    print(" 3) Strict\n")
+
+    choice = input("Select new SSL/TLS mode (1-3) or Enter to skip: ").strip()
+    mode_map = {"1": "flexible", "2": "full", "3": "strict"}
+    if choice not in mode_map:
+        print("⚠ No change applied.\n")
+        return
+
+    new_mode = mode_map[choice]
+    print(f"\n🔄 Updating SSL/TLS mode to {new_mode.capitalize()} ...")
+    spin_stop = spinner_start("⚙️ Applying")
+    r2 = cf_patch(session,
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/settings/ssl",
+        {"value": new_mode}
+    )
+    spin_stop()
+
+    if r2.status_code == 200 and r2.json().get("success"):
+        print(f"✅ SSL/TLS mode changed to {new_mode.capitalize()}.\n")
+    else:
+        print("❌ Failed to update SSL/TLS mode.\n")
+
+    input("Press Enter to return to main menu...")
+
+# -----------------------
+# FEATURE: TOOLS MENU (Option 8)
 # -----------------------
 
 def tools_menu(session, zone_id, domain):
@@ -447,13 +517,6 @@ def tools_menu(session, zone_id, domain):
         else:
             print("❌ Invalid.\n")
 
-# (stubs: can be expanded like before if wanted)
-def nameserver_manager():
-    print("\nℹ Name Server Manager not expanded in v9.4 yet.\n")
-
-def ssl_manager():
-    print("\nℹ SSL/TLS Mode Manager not expanded in v9.4 yet.\n")
-
 # -----------------------
 # MAIN MENU LOOP
 # -----------------------
@@ -473,7 +536,7 @@ def main():
         total_dns = len(list_dns(session, zone_id))
 
         print("\n╭────────────────────────────────────────────╮")
-        print("│ Cloudflare DNS Manager v9.4 — MHR Edition │")
+        print("│ Cloudflare DNS Manager v9.5 — MHR Edition │")
         print("│   Developed by MHR Dev Team               │")
         print("╰────────────────────────────────────────────╯\n")
 
@@ -497,37 +560,27 @@ def main():
 
         if choice == "1":
             create_dns_records(session, zone_id, domain)
-
         elif choice == "2":
             create_dns_random(session, zone_id, domain)
-
         elif choice == "3":
             delete_dns(session, zone_id)
-
         elif choice == "4":
             list_normal(session, zone_id)
-
         elif choice == "5":
             list_pro(session, zone_id)
-
         elif choice == "6":
-            nameserver_manager()
-
+            show_nameservers(session, zone_id)
         elif choice == "7":
-            ssl_manager()
-
+            ssl_tls_mode_manager(session, zone_id)
         elif choice == "8":
             tools_menu(session, zone_id, domain)
-
         elif choice == "9":
             delete_credentials()
             break
-
         elif choice == "10":
             print("👋 Exiting...")
             time.sleep(0.4)
             break
-
         else:
             print("❌ Invalid option.\n")
 
