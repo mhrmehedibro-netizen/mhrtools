@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # ════════════════════════════════════════════════════════════════════
-#  Cloudflare DNS Manager v9.7.4 — Zone Control Edition
+#  Cloudflare DNS Manager v9.7.5 — Permission Guard Edition
 #  Made by MHR 🌿
 #  Developed & Maintained by MHR Dev Team
 #
 #  Highlights:
 #   - Auto Login / Logout (credentials.json)
-#   - DNS Create (serial prefix) / DNS Create (random)
-#   - DNS Delete (single / wipe all)
-#   - DNS List (Normal / Pro) with flags + sorted us1/us2/us10
-#   - Name Server Manager (assigned CF NS)
-#   - SSL/TLS Mode Manager (safe permission aware)
+#   - Startup Permission Guard (checks token permissions before menu)
+#   - DNS Create (serial prefix) / DNS Create (random labels)
+#   - DNS Delete (single / wipe-all with confirm 2x)
+#   - DNS List (Normal / Pro) with nice grouping + flags + natural sort
+#   - Name Server Manager (view Cloudflare nameservers)
+#   - SSL/TLS Mode Manager (view + update; permission aware)
 #   - Tools Menu:
 #         [1] Add Specific Domain        (POST /zones)
 #         [2] Remove Specific Domain     (DELETE /zones/:id)
@@ -18,15 +19,15 @@
 #         [4] Check Token Permissions    (tokens/verify)
 #         [5] Show All Domains           (list zones)
 #   - Domain add/remove logged to domain_activity_log.txt
-#   - Spinner + Progress bar visuals
+#   - Spinner + Progress bar animations everywhere
 #
-#  REQUIREMENTS on VPS (Debian 12+ typically fine after this):
+#  REQUIREMENTS on a fresh Debian VPS:
 #     apt update -y && apt install -y python3 python3-pip
 #     pip3 install requests
 #
 #  USAGE:
-#     python3 cf_auto_dns_v9_7_4.py
-#     python3 cf_auto_dns_v9_7_4.py --check-token
+#     python3 cf_auto_dns_v9_7_5.py
+#     python3 cf_auto_dns_v9_7_5.py --check-token
 #
 # ════════════════════════════════════════════════════════════════════
 
@@ -36,7 +37,7 @@ from datetime import datetime
 CRED_FILE = "credentials.json"
 DIV       = "────────────────────────────────────────────"
 
-# map prefix -> flag for DNS List (Pro View)
+# prefix -> flag (used in Pro DNS list)
 FLAG_MAP = {
     "us": "🇺🇸",
     "uk": "🇬🇧",
@@ -162,7 +163,7 @@ def get_auth():
     return token, zone_id, domain
 
 # ═════════════════════════════════════════
-# Cloudflare basic helpers
+# Cloudflare basic helpers (requests)
 # ═════════════════════════════════════════
 
 def cf_get(session, url, params=None):
@@ -186,7 +187,7 @@ def get_zone_status(session, zone_id):
     r = cf_get(session, f"https://api.cloudflare.com/client/v4/zones/{zone_id}")
     if r.status_code == 200:
         status = r.json().get("result", {}).get("status", "")
-        # suspended / locked / hold = flagged
+        # suspended / locked / hold => treat as abuse 1
         if status in ["suspended", "locked", "hold"]:
             return 1
         return 0
@@ -198,7 +199,7 @@ def get_zone_status(session, zone_id):
 
 def list_all_domains(session):
     """
-    Return list of (zone_id, name, status)
+    Return list of zones as dicts {id,name,status}
     """
     r = cf_get(session, "https://api.cloudflare.com/client/v4/zones")
     if r.status_code != 200:
@@ -218,8 +219,21 @@ def list_all_domains(session):
 
 def add_specific_domain(session, new_domain):
     """
-    Add domain by calling POST /zones
+    Add ONLY root domain (example.com), not subdomain.
+    Cloudflare API: POST /zones
     """
+    # prevent subdomain by quick check:
+    if new_domain.count(".") < 1:
+        print("❌ Invalid domain format.\n")
+        return
+    if new_domain.count(".") >= 2:
+        # e.g. vboss4.ggff.net (subdomain)
+        # Cloudflare won't accept as zone
+        print("⚠ This looks like a subdomain.")
+        print("  You can NOT add subdomain as new zone.")
+        print("  To create subdomain, use 'Create DNS Records'.\n")
+        return
+
     stop = spinner_start("🧩 Adding Domain")
     resp = cf_post(
         session,
@@ -236,7 +250,7 @@ def add_specific_domain(session, new_domain):
         print("   Domain :", new_domain)
         print("   Zone ID:", zone_id)
         print("   Status :", status, "\n")
-        # log
+        # log this
         with open("domain_activity_log.txt", "a") as f:
             f.write(f"[{datetime.utcnow().isoformat()}] ADDED {new_domain} zone_id={zone_id} status={status}\n")
     else:
@@ -245,7 +259,9 @@ def add_specific_domain(session, new_domain):
 
 def remove_specific_domain(session):
     """
-    Show all zones, pick one by number, delete /zones/:id
+    1. show list of zones
+    2. choose a zone
+    3. DELETE /zones/:id
     """
     zones, err = list_all_domains(session)
     if err or zones is None:
@@ -295,7 +311,7 @@ def remove_specific_domain(session):
 
 def show_all_domains(session):
     """
-    List all domains in account, save to domain_list.txt
+    List all domains in account + save to domain_list.txt
     """
     zones, err = list_all_domains(session)
     if err or zones is None:
@@ -322,35 +338,129 @@ def show_all_domains(session):
     print("📄 Saved to domain_list.txt\n")
 
 # ═════════════════════════════════════════
-# Permission checker
+# Permission checker + validator
 # ═════════════════════════════════════════
 
-def check_token_permissions(token):
-    print("\n🔍 Checking Cloudflare Token Permissions...")
-    stop = spinner_start("Verifying")
+def check_token_permissions_raw(token):
+    """
+    Low-level checker (no prompts). Returns (success, http_code, perms_list or err_msg)
+    perms_list is list[str] of permission group names
+    """
     headers = cf_headers(token)
     url = "https://api.cloudflare.com/client/v4/user/tokens/verify"
     r = requests.get(url, headers=headers)
-    stop()
 
     if r.status_code != 200:
-        print("❌ Failed to verify token (HTTP error).")
-        print(f"   HTTP Code: {r.status_code}\n")
-        return
+        return False, r.status_code, f"HTTP {r.status_code}"
 
     data = r.json()
     if not data.get("success"):
-        print("❌ Invalid API token.\n")
-        return
+        return False, 200, "Token invalid"
 
     policies = data["result"].get("policies", [])
-    print("\n✅ Token Verified. Permissions:")
-    if not policies:
-        print("   (No explicit policy list from API)")
+    perms_list = []
     for p in policies:
         for perm in p.get("permission_groups", []):
-            print("  •", perm.get("name"))
+            name = perm.get("name")
+            if name:
+                perms_list.append(name)
+    return True, 200, perms_list
+
+def check_token_permissions_display(token):
+    """
+    Interactive pretty view (used in Tools -> Check Token Permissions)
+    """
+    print("\n🔍 Checking Cloudflare Token Permissions...")
+    stop = spinner_start("Verifying")
+    ok, code, payload = check_token_permissions_raw(token)
+    stop()
+
+    if not ok:
+        print("❌ Failed to verify token.")
+        print(f"   Detail: {payload}\n")
+        return
+
+    perms_list = payload
+    print("\n✅ Token Verified. Permissions:")
+    if not perms_list:
+        print("   (No explicit policy list from API)")
+    else:
+        for p in perms_list:
+            print("  •", p)
     print("\n📜 Permission check complete!\n")
+
+def permission_guard(token):
+    """
+    Run at startup.
+    We define required keywords that should appear in permission names.
+    If missing, warn user and allow continue or exit.
+    """
+    required_keywords = [
+        "Zone Read",
+        "Zone Edit",
+        "Zone Settings Read",
+        "Zone Settings Edit",
+        "DNS Read",
+        "DNS Edit",
+        "SSL and Certificates Edit",
+        "User Details Read",
+        "User Read",  # fallback name
+    ]
+
+    print("🔍 Checking Cloudflare Token Permissions...")
+    stop = spinner_start("Verifying")
+    ok, code, payload = check_token_permissions_raw(token)
+    stop()
+
+    if not ok:
+        print("❌ Could not verify token permissions.")
+        print(f"   Detail: {payload}")
+        ans = input("Continue anyway? (y/n): ").strip().lower()
+        if ans != "y":
+            sys.exit(1)
+        return
+
+    perms_list = payload  # list of permission group names from CF
+    # build a simple text blob to match keywords against
+    blob = " | ".join(perms_list)
+
+    missing_any = False
+    missing_list = []
+    # We'll treat 'User Details Read' and 'User Read' as same family
+    normalized_reqs = [
+        ("Zone Read",            ["Zone Read"]),
+        ("Zone Edit",            ["Zone Edit"]),
+        ("Zone Settings Read",   ["Zone Settings Read", "Zone Settings:Read"]),
+        ("Zone Settings Edit",   ["Zone Settings Edit", "Zone Settings:Edit"]),
+        ("DNS Read",             ["DNS Read", "Zone DNS Read"]),
+        ("DNS Edit",             ["DNS Edit", "Zone DNS Edit"]),
+        ("SSL and Certificates Edit", ["SSL and Certificates Edit", "SSL Edit", "SSL and Certificates:Edit"]),
+        ("User Read",            ["User Read", "User Details Read", "User Details:Read", "User Details Read permission"]),
+    ]
+
+    for human_name, patterns in normalized_reqs:
+        found = False
+        for pat in patterns:
+            if pat.lower() in blob.lower():
+                found = True
+                break
+        if not found:
+            missing_any = True
+            missing_list.append(human_name)
+
+    if not missing_any:
+        print("✅ All required permissions verified!\n")
+        return
+
+    print("⚠ Missing Permissions Detected:")
+    for m in missing_list:
+        print("  -", m)
+
+    print("\nThese permissions are needed for full control (DNS edit, SSL/TLS change, zone add/remove).")
+    ans = input("Continue anyway? (y/n): ").strip().lower()
+    if ans != "y":
+        print("👋 Exiting due to insufficient permissions.")
+        sys.exit(1)
 
 # ═════════════════════════════════════════
 # DNS Create (serial prefix e.g. us1, us2...)
@@ -396,7 +506,7 @@ def create_dns_records(session, zone_id, domain):
     print(f"⏱ Time: {total_time:.2f}s\n")
 
 # ═════════════════════════════════════════
-# DNS Create (random 5–8 char label)
+# DNS Create (random label 5–8 char)
 # ═════════════════════════════════════════
 
 def create_dns_random(session, zone_id, domain):
@@ -540,7 +650,7 @@ def list_normal(session, zone_id):
     print("\n📄 Saved to dns_list_normal.txt\n")
 
 # ═════════════════════════════════════════
-# DNS List (Pro View)
+# DNS List (Pro)
 # ═════════════════════════════════════════
 
 def list_pro(session, zone_id):
@@ -702,41 +812,26 @@ def tools_menu(session, zone_id, domain, token):
                 print("⚠️ Possible suspension / hold detected.\n")
 
         elif c == "4":
-            check_token_permissions(token)
+            check_token_permissions_display(token)
 
         elif c == "5":
             show_all_domains(session)
 
         else:
-            # any other key = back
+            # any other key => back
             break
 
 # ═════════════════════════════════════════
 # Main Menu
 # ═════════════════════════════════════════
 
-def main():
-    # one-off permission check mode
-    if len(sys.argv) > 1 and sys.argv[1] == "--check-token":
-        token = getpass.getpass("Enter Cloudflare API Token: ").strip()
-        check_token_permissions(token)
-        return
-
-    creds = load_credentials()
-    if creds:
-        token, zone_id, domain = creds["token"], creds["zone_id"], creds["domain"]
-    else:
-        token, zone_id, domain = get_auth()
-
-    session = requests.Session()
-    session.headers.update(cf_headers(token))
-
+def main_menu_loop(session, token, zone_id, domain):
     while True:
         abuse_flag = get_zone_status(session, zone_id)
         total_dns  = len(list_dns(session, zone_id))
 
         print("\n╭────────────────────────────────────────────╮")
-        print("│ Cloudflare DNS Manager v9.7.4 — MHR Edition │")
+        print("│ Cloudflare DNS Manager v9.7.5 — MHR Edition │")
         print("│    Developed by MHR Dev Team 🌿             │")
         print("╰────────────────────────────────────────────╯\n")
 
@@ -783,6 +878,34 @@ def main():
             break
         else:
             print("❌ Invalid option.\n")
+
+# ═════════════════════════════════════════
+# Entry point (with --check-token mode + Permission Guard)
+# ═════════════════════════════════════════
+
+def main():
+    # quick mode: just check token
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-token":
+        token = getpass.getpass("Enter Cloudflare API Token: ").strip()
+        check_token_permissions_display(token)
+        return
+
+    # normal mode
+    creds = load_credentials()
+    if creds:
+        token, zone_id, domain = creds["token"], creds["zone_id"], creds["domain"]
+    else:
+        token, zone_id, domain = get_auth()
+
+    # make session
+    session = requests.Session()
+    session.headers.update(cf_headers(token))
+
+    # 🔐 Permission Guard before menu:
+    permission_guard(token)
+
+    # then show menu loop
+    main_menu_loop(session, token, zone_id, domain)
 
 if __name__ == "__main__":
     main()
